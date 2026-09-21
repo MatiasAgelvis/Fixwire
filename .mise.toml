@@ -1,2 +1,6 @@
 [tools]
 python = "3.11"
+
+[env]
+_.path = [".venv/bin"]
+VIRTUAL_ENV = ".venv"
