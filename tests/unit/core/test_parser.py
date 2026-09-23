@@ -7,6 +7,24 @@ from fixwire.core.message import FIXMessage
 from fixwire.core.parser import FIXParseError, FIXParser
 
 
+def build_raw_message(fields: dict[int, str]) -> bytes:
+    """Build a raw FIX message from tag-value pairs."""
+    parts = [f"{tag}={value}" for tag, value in fields.items()]
+    body = SOH.join(parts) + SOH
+    body_bytes = body.encode("ascii")
+    body_length = len(body_bytes)
+
+    result = bytearray()
+    result.extend(b"8=FIX.4.4" + SOH.encode())
+    result.extend(f"9={body_length}".encode() + SOH.encode())
+    result.extend(body_bytes)
+
+    checksum = sum(result) % 256
+    result.extend(f"10={checksum:03d}".encode() + SOH.encode())
+
+    return bytes(result)
+
+
 class TestFIXParser:
     """Test FIXParser class."""
 
@@ -14,36 +32,12 @@ class TestFIXParser:
         """Setup test fixtures."""
         self.parser = FIXParser()
 
-    def _build_message(self, **fields) -> bytes:
-        """Helper to build a raw FIX message."""
-        parts = []
-        for tag, value in fields.items():
-            parts.append(f"{tag}={value}")
-
-        body = SOH.join(parts) + SOH
-        body_bytes = body.encode("ascii")
-
-        # Calculate body length
-        body_length = len(body_bytes)
-
-        # Build message
-        result = bytearray()
-        result.extend(b"8=FIX.4.4" + SOH.encode())
-        result.extend(f"9={body_length}".encode() + SOH.encode())
-        result.extend(body_bytes)
-
-        # Calculate checksum
-        checksum = sum(result) % 256
-        result.extend(f"10={checksum:03d}".encode() + SOH.encode())
-
-        return bytes(result)
-
     def test_parse_single_message(self):
         """Parse a single complete message."""
-        raw = self._build_message(
-            **{"35": "D", "49": "CLIENT01", "56": "MARKET01",
-               "34": "1", "52": "20231220-14:30:00.000"}
-        )
+        raw = build_raw_message({
+            35: "D", 49: "CLIENT01", 56: "MARKET01",
+            34: "1", 52: "20231220-14:30:00.000"
+        })
 
         messages = self.parser.parse(raw)
 
@@ -56,8 +50,8 @@ class TestFIXParser:
 
     def test_parse_multiple_messages(self):
         """Parse multiple messages in one buffer."""
-        msg1 = self._build_message(**{"35": "D", "49": "C1", "56": "M1", "34": "1"})
-        msg2 = self._build_message(**{"35": "D", "49": "C1", "56": "M1", "34": "2"})
+        msg1 = build_raw_message({35: "D", 49: "C1", 56: "M1", 34: "1"})
+        msg2 = build_raw_message({35: "D", 49: "C1", 56: "M1", 34: "2"})
 
         messages = self.parser.parse(msg1 + msg2)
 
@@ -66,7 +60,7 @@ class TestFIXParser:
         assert messages[1].sequence == 2
 
     def test_parse_incomplete_message(self):
-        """Parse incomplete message (returns None)."""
+        """Parse incomplete message (returns empty)."""
         raw = b"8=FIX.4.4\x019=50\x0135=D"
 
         messages = self.parser.parse(raw)
@@ -76,7 +70,7 @@ class TestFIXParser:
     def test_parse_with_garbage_before(self):
         """Parse message with garbage data before it."""
         garbage = b"some random data\x00\x00"
-        msg = self._build_message(**{"35": "D", "49": "C1", "56": "M1"})
+        msg = build_raw_message({35: "D", 49: "C1", 56: "M1"})
 
         messages = self.parser.parse(garbage + msg)
 
@@ -85,10 +79,10 @@ class TestFIXParser:
 
     def test_checksum_validation(self):
         """Validate checksum on parsed message."""
-        raw = self._build_message(
-            **{"35": "A", "49": "CLIENT", "56": "SERVER",
-               "34": "1", "98": "0", "108": "30"}
-        )
+        raw = build_raw_message({
+            35: "A", 49: "CLIENT", 56: "SERVER",
+            34: "1", 98: "0", 108: "30"
+        })
 
         messages = self.parser.parse(raw)
 
@@ -96,7 +90,7 @@ class TestFIXParser:
 
     def test_checksum_mismatch_strict(self):
         """Reject message with bad checksum in strict mode."""
-        raw = self._build_message(**{"35": "D", "49": "C1", "56": "M1"})
+        raw = build_raw_message({35: "D", 49: "C1", 56: "M1"})
 
         # Corrupt checksum
         raw = raw[:-5] + b"999\x01"
@@ -114,8 +108,7 @@ class TestFIXParser:
         ]).encode() + SOH.encode()
 
         with pytest.raises(FIXParseError, match="Invalid BeginString"):
-            self.parser.parse(msg
-)
+            self.parser.parse(msg)
 
     def test_empty_message(self):
         """Reject empty message."""
@@ -124,7 +117,7 @@ class TestFIXParser:
 
     def test_get_message_type(self):
         """Get message type from parsed message."""
-        raw = self._build_message(**{"35": "D", "49": "C1", "56": "M1"})
+        raw = build_raw_message({35: "D", 49: "C1", 56: "M1"})
 
         messages = self.parser.parse(raw)
 
@@ -132,10 +125,10 @@ class TestFIXParser:
 
     def test_get_all_tags(self):
         """Get all tags from parsed message."""
-        raw = self._build_message(
-            **{"35": "D", "49": "CLIENT", "56": "SERVER",
-               "11": "ORD001", "55": "AAPL", "54": "1"}
-        )
+        raw = build_raw_message({
+            35: "D", 49: "CLIENT", 56: "SERVER",
+            11: "ORD001", 55: "AAPL", 54: "1"
+        })
 
         messages = self.parser.parse(raw)
         msg = messages[0]
@@ -149,7 +142,7 @@ class TestFIXParser:
 
     def test_buffer_accumulation(self):
         """Test that parser buffers partial data."""
-        msg = self._build_message(**{"35": "D", "49": "C1", "56": "M1"})
+        msg = build_raw_message({35: "D", 49: "C1", 56: "M1"})
 
         # Send first half
         messages1 = self.parser.parse(msg[:len(msg) // 2])
@@ -161,7 +154,7 @@ class TestFIXParser:
 
     def test_reset_parser(self):
         """Test parser reset clears buffer."""
-        raw = self._build_message(**{"35": "D", "49": "C1", "56": "M1"})
+        raw = build_raw_message({35: "D", 49: "C1", 56: "M1"})
 
         self.parser.parse(raw[:50])
         assert self.parser.buffer_size > 0
@@ -171,10 +164,10 @@ class TestFIXParser:
 
     def test_parse_logon_message(self):
         """Parse a Logon message."""
-        raw = self._build_message(
-            **{"35": "A", "49": "CLIENT01", "56": "MARKET01",
-               "34": "1", "98": "0", "108": "30"}
-        )
+        raw = build_raw_message({
+            35: "A", 49: "CLIENT01", 56: "MARKET01",
+            34: "1", 98: "0", 108: "30"
+        })
 
         messages = self.parser.parse(raw)
         msg = messages[0]
@@ -185,10 +178,10 @@ class TestFIXParser:
 
     def test_parse_heartbeat(self):
         """Parse a Heartbeat message."""
-        raw = self._build_message(
-            **{"35": "0", "49": "SERVER", "56": "CLIENT",
-               "34": "5", "52": "20231220-14:30:00.000"}
-        )
+        raw = build_raw_message({
+            35: "0", 49: "SERVER", 56: "CLIENT",
+            34: "5", 52: "20231220-14:30:00.000"
+        })
 
         messages = self.parser.parse(raw)
         msg = messages[0]
@@ -197,10 +190,10 @@ class TestFIXParser:
 
     def test_parse_with_text_field(self):
         """Parse message with text field."""
-        raw = self._build_message(
-            **{"35": "3", "49": "SERVER", "56": "CLIENT",
-               "34": "10", "45": "5", "58": "Invalid message format"}
-        )
+        raw = build_raw_message({
+            35: "3", 49: "SERVER", 56: "CLIENT",
+            34: "10", 45: "5", 58: "Invalid message format"
+        })
 
         messages = self.parser.parse(raw)
         msg = messages[0]
@@ -210,10 +203,10 @@ class TestFIXParser:
 
     def test_validate_message_valid(self):
         """Validate a valid message."""
-        raw = self._build_message(
-            **{"35": "D", "49": "CLIENT", "56": "SERVER",
-               "34": "1", "52": "20231220-14:30:00.000"}
-        )
+        raw = build_raw_message({
+            35: "D", 49: "CLIENT", 56: "SERVER",
+            34: "1", 52: "20231220-14:30:00.000"
+        })
 
         messages = self.parser.parse(raw)
         errors = self.parser.validate_message(messages[0])
@@ -222,8 +215,6 @@ class TestFIXParser:
 
     def test_validate_message_missing_tags(self):
         """Validate message with missing required tags."""
-        from fixwire.core.message import FIXMessage
-
         msg = FIXMessage()
         msg[35] = "D"
 
@@ -239,7 +230,7 @@ class TestFIXParser:
         parser._strict_mode = False
 
         # Message with bad checksum shouldn't raise
-        raw = self._build_message(**{"35": "D", "49": "C1", "56": "M1"})
+        raw = build_raw_message({35: "D", 49: "C1", 56: "M1"})
         raw = raw[:-5] + b"999\x01"
 
         # Should not raise, just skip the message
