@@ -269,18 +269,6 @@ class FIXMessage:
             msg[tag] = str(value)
         return msg
 
-    @classmethod
-    def from_raw(cls, raw: bytes) -> FIXMessage:
-        """Create message from raw bytes.
-
-        This is a convenience method - prefer FIXParser for production use.
-        """
-        parser = FIXParser()
-        messages = parser.parse(raw)
-        if messages:
-            return messages[0]
-        return cls()
-
     # Convenience properties for common tags
     # --- Order Identifiers ---
 
