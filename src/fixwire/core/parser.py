@@ -119,6 +119,43 @@ class FIXParser:
             logger.warning("parse.error", error=str(e), raw=raw_msg[:100])
             return None
 
+    def _handle_special_tag(self, tag: int, value: str, msg: FIXMessage, raw: bytes) -> tuple[int, bool] | None:
+        """Handle special tags (BeginString, BodyLength, CheckSum).
+
+        Args:
+            tag: Tag number.
+            value: Tag value.
+            msg: Message being built.
+            raw: Raw message bytes.
+
+        Returns:
+            Tuple of (body_length, in_body) if special tag handled, None otherwise.
+
+        Raises:
+            FIXParseError: If invalid BeginString.
+        """
+        if tag == 8:  # BeginString
+            if not value.startswith("FIX."):
+                raise FIXParseError(
+                    f"Invalid BeginString: {value}",
+                    raw=raw,
+                    tag=8
+                )
+            msg[8] = value
+            return 0, False
+
+        if tag == 9:  # BodyLength
+            body_length = int(value)
+            msg[9] = value
+            return body_length, True
+
+        if tag == 10:  # CheckSum
+            msg[10] = value
+            self.validate_checksum(raw)
+            return 0, False
+
+        return None
+
     def _find_message_end(self) -> int:
         """Find the end of a FIX message in the buffer.
 
@@ -229,26 +266,9 @@ class FIXParser:
                 )
 
             # Handle special tags
-            if tag == 8:  # BeginString
-                if not value.startswith("FIX."):
-                    raise FIXParseError(
-                        f"Invalid BeginString: {value}",
-                        raw=raw,
-                        tag=8
-                    )
-                msg[8] = value
-                continue
-
-            if tag == 9:  # BodyLength
-                body_length = int(value)
-                msg[9] = value
-                in_body = True
-                continue
-
-            if tag == 10:  # CheckSum
-                msg[10] = value
-                # Validate checksum
-                self._validate_checksum(raw, value)
+            result = self._handle_special_tag(tag, value, msg, raw)
+            if result is not None:
+                body_length, in_body = result
                 continue
 
             # All other tags are in the body
