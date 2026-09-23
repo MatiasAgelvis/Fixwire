@@ -2,7 +2,8 @@
 
 import pytest
 
-from fixwire.core.message import SOH
+from fixwire.core.constants import SOH
+from fixwire.core.message import FIXMessage
 from fixwire.core.parser import FIXParseError, FIXParser
 
 

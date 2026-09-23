@@ -2,7 +2,8 @@
 
 from datetime import datetime
 
-from fixwire.core.message import SOH, FIXMessage
+from fixwire.core.constants import SOH
+from fixwire.core.message import FIXMessage
 
 
 class TestFIXMessage:
