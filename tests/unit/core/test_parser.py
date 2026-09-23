@@ -93,7 +93,8 @@ class TestFIXParser:
         raw = build_raw_message({35: "D", 49: "C1", 56: "M1"})
 
         # Corrupt checksum
-        raw = raw[:-5] + b"999\x01"
+        # This value is out of range for a checksum
+        raw = raw[:-4] + b"999" + SOH.encode()
 
         with pytest.raises(FIXParseError, match="Checksum mismatch"):
             self.parser.parse(raw)
