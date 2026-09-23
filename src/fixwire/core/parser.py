@@ -280,33 +280,58 @@ class FIXParser:
 
         return msg
 
-    def _validate_checksum(self, raw: bytes, expected_checksum: str) -> None:
+    def validate_checksum(self, raw: bytes) -> bool:
         """Validate message checksum.
+
+        Can be called standalone or during parsing.
+        Behavior depends on strict_mode:
+        - Strict: raises FIXParseError on invalid checksum
+        - Non-strict: logs warning, returns False
 
         Args:
             raw: Complete raw message bytes.
-            expected_checksum: Expected checksum value.
+
+        Returns:
+            True if checksum is valid, False otherwise.
 
         Raises:
-            FIXParseError: If checksum doesn't match.
+            FIXParseError: If strict mode and checksum invalid.
         """
         # Find position of 10=
         idx = raw.rfind(b"10=")
         if idx == -1:
             if self._strict_mode:
                 raise FIXParseError("No checksum tag found", raw=raw)
-            return
+            logger.warning("parser.no_checksum", raw=raw[:50])
+            return False
 
         # Calculate checksum of all bytes before tag 10
         calculated = sum(raw[:idx]) % 256
-        expected = int(expected_checksum)
 
-        if calculated != expected:
-            raise FIXParseError(
-                f"Checksum mismatch: calculated={calculated}, expected={expected}",
-                raw=raw,
-                tag=10
+        # Extract expected checksum from message
+        try:
+            extracted = int(raw[idx + 3:idx + 6])
+        except (ValueError, IndexError):
+            if self._strict_mode:
+                raise FIXParseError("Invalid checksum format", raw=raw, tag=10) from None
+            logger.warning("parser.invalid_checksum_format", raw=raw[:50])
+            return False
+
+        if calculated != extracted:
+            if self._strict_mode:
+                raise FIXParseError(
+                    f"Checksum mismatch: calculated={calculated}, expected={extracted}",
+                    raw=raw,
+                    tag=10
+                )
+            logger.warning(
+                "parser.checksum_mismatch",
+                calculated=calculated,
+                extracted=extracted,
             )
+            return False
+
+        return True
 
     def validate_message(self, msg: FIXMessage) -> list[str]:
         """Validate a FIX message.
