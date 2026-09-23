@@ -167,13 +167,15 @@ class FIXParser:
         """
         for pos in range(len(self._buffer) - 6):
             if self._buffer[pos:pos + 3] == b"10=":
-                result = self._validate_checksum_at(pos)
+                result = self._find_checksum_field(pos)
                 if result is not None:
                     return result
         return -1
 
-    def _validate_checksum_at(self, pos: int) -> int | None:
-        """Validate checksum field at given position.
+    def _find_checksum_field(self, pos: int) -> int | None:
+        """Find checksum field boundary at given position.
+
+        Validates format only (10=XXX<SOH>), not checksum value.
 
         Format: 10=XXX<SOH>
                 ^pos
@@ -184,7 +186,7 @@ class FIXParser:
             pos: Position of '10=' in buffer.
 
         Returns:
-            Index after SOH if valid, None otherwise.
+            Index after SOH if valid format, None otherwise.
         """
         # Need: 10= (3) + digits (3) + SOH (1) = 7 bytes minimum
         if pos + 7 > len(self._buffer):
@@ -197,10 +199,6 @@ class FIXParser:
         # Validate digits are numeric
         digits = self._buffer[pos + 3:pos + 6]
         if not digits.isdigit():
-            return None
-
-        # Validate range (checksum is 0-255)
-        if int(digits) > 255:
             return None
 
         # Verify SOH delimiter follows
