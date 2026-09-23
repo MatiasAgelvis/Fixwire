@@ -106,6 +106,7 @@ class FIXParser:
             return None
 
         # Extract complete message
+        # and remove it from buffer
         raw_msg = bytes(self._buffer[:end])
         self._buffer = self._buffer[end:]
 
@@ -122,21 +123,17 @@ class FIXParser:
         """Find the end of a FIX message in the buffer.
 
         Looks for pattern: 10=XXX<SOH> where XXX is 3 digits (0-255).
+        Searches left to right for multi-message support.
 
         Returns:
             Index after the final SOH, or -1 if not found.
         """
-        idx = 0
-        while True:
-            pos = self._buffer.find(b"10=", idx)
-            if pos == -1:
-                return -1
-
-            end = self._validate_checksum_at(pos)
-            if end is not None:
-                return end
-
-            idx = pos + 1
+        for pos in range(len(self._buffer) - 6):
+            if self._buffer[pos:pos + 3] == b"10=":
+                result = self._validate_checksum_at(pos)
+                if result is not None:
+                    return result
+        return -1
 
     def _validate_checksum_at(self, pos: int) -> int | None:
         """Validate checksum field at given position.
