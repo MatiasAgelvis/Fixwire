@@ -7,7 +7,8 @@ from __future__ import annotations
 
 import structlog
 
-from fixwire.core.message import SOH, FIXMessage
+from fixwire.core.constants import SOH
+from fixwire.core.message import FIXMessage
 
 logger = structlog.get_logger()
 

@@ -10,10 +10,8 @@ from collections.abc import Iterator
 from datetime import datetime
 from typing import Any
 
-from fixwire.core.parser import FIXParser
+from fixwire.core.constants import SOH
 from fixwire.core.tags import get_tag_name
-
-SOH = "\x01"  # FIX field delimiter
 
 
 class FIXMessage:
