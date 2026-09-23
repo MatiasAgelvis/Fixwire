@@ -167,7 +167,7 @@ class FIXParser:
             return None
 
         # Verify SOH delimiter follows
-        if self._buffer[pos + 6] != SOH[0]:
+        if self._buffer[pos + 6] != ord(SOH):
             return None
 
         return pos + 7
