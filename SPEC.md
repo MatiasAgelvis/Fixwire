@@ -1145,6 +1145,54 @@ class ErrorResponse(BaseModel):
     # }
 ```
 
+## Testing Methodology
+
+### Philosophy: TDD First
+
+We follow **Test-Driven Development (TDD)** to fail early and design better APIs:
+
+1. **Red** — Write a failing test that defines desired behavior
+2. **Green** — Write minimal code to pass the test
+3. **Refactor** — Improve code while keeping tests green
+
+**Why TDD?**
+- **Fail early** — Catch design issues before implementation grows
+- **Better APIs** — Tests drive clean, testable interfaces
+- **Regression safety** — Every bug gets a test before the fix
+- **Documentation** — Tests show how code should be used
+
+**When to write tests:**
+- **Before code** — For new features (TDD cycle)
+- **During bugs** — Write failing test first, then fix
+- **After code** — Only for existing untested code (legacy)
+
+**Test organization:**
+- Unit tests: Test components in isolation
+- Integration tests: Test component interactions
+- Load tests: Test performance under stress
+- Chaos tests: Test resilience to failures
+
+**Test structure (AAA Pattern):**
+```python
+def test_example(self):
+    """Description of what is being tested."""
+    # Arrange - Set up test fixtures
+    msg = FIXMessage()
+    
+    # Act - Perform the action
+    msg[35] = "D"
+    
+    # Assert - Verify the result
+    assert msg[35] == "D"
+```
+
+Each test follows:
+1. **Arrange** — Set up fixtures, mocks, and test data
+2. **Act** — Execute the code being tested
+3. **Assert** — Verify the expected outcome
+
+---
+
 ## Testing Strategy
 
 ### Test Structure
