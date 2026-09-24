@@ -262,11 +262,14 @@ class FIXMessage:
         return "\n".join(parts)
 
     @classmethod
-    def from_dict(cls, data: dict[int, str]) -> FIXMessage:
-        """Create message from dictionary."""
+    def from_dict(cls, data: dict[int | str, int | str]) -> FIXMessage:
+        """Create message from dictionary.
+
+        Accepts both int and string keys/values, casting to int/str.
+        """
         msg = cls()
         for tag, value in data.items():
-            msg[tag] = str(value)
+            msg[int(tag)] = str(value)
         return msg
 
     # Convenience properties for common tags
