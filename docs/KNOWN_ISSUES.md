@@ -1,5 +1,8 @@
 # Known Issues & Improvements
 
+> **Methodology:** We follow TDD (Test-Driven Development). Write tests first, then implement.
+> See [SPEC.md - Testing Methodology](../SPEC.md#testing-methodology) for details.
+
 ## Parser
 
 ### Malformed Message Handling
