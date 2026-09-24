@@ -175,53 +175,59 @@ class FIXMessage:
         """Get all tag values."""
         return list(self._tags.values())
 
-    def serialize(self) -> bytes:
-        """Serialize message to FIX wire format.
+    def _build_body_bytes(self) -> bytearray:
+        """Build message bytes without checksum field.
 
         Returns:
-            Complete FIX message bytes with BodyLength and CheckSum.
-
-        Note:
-            BodyLength (tag 9) and CheckSum (tag 10) are calculated automatically.
-            SendingTime (tag 52) is set to current time if not set.
+            Bytearray containing header + body (8=, 9=, and body tags)
         """
         # Set sending time if not set
         if 52 not in self._tags:
             self.sending_time = datetime.now()
 
-        # Build body (everything after BodyLength)
+        # Build body (everything except BeginString, BodyLength, CheckSum)
         body_parts = []
         for tag, value in self._tags.items():
-            if tag in (9, 10):  # Skip BodyLength and CheckSum
+            if tag in (8, 9, 10):
+                # Skip BeginString, BodyLength, and CheckSum tags
                 continue
             body_parts.append(f"{tag}={value}{SOH}")
 
         body = SOH.join(body_parts) + SOH
         body_bytes = body.encode("ascii")
-
-        # Calculate BodyLength (length of body from tag 35 to before tag 10)
         body_length = len(body_bytes)
 
-        # Insert BodyLength after BeginString
-        # Find position after first SOH (after 8=FIX.4.4)
+        # Build result with header
         result = bytearray()
         result.extend(f"8=FIX.4.4{SOH}".encode("ascii"))
         result.extend(f"9={body_length}{SOH}".encode("ascii"))
         result.extend(body_bytes)
 
-        # Calculate checksum
-        checksum = sum(result) % 256
-        result.extend(f"10={checksum:03d}{SOH}".encode("ascii"))
+        return result
 
+    @staticmethod
+    def _calculate_checksum(data: bytes | bytearray) -> int:
+        """FIX checksum: sum of bytes mod 256."""
+        return sum(data) % 256
+
+    def serialize(self) -> bytes:
+        """Serialize message to FIX wire format.
+
+        Returns:
+            Complete FIX message bytes with BodyLength and CheckSum.
+        """
+        result = self._build_body_bytes()
+        checksum_value = self._calculate_checksum(result)
+        result.extend(f"10={checksum_value:03d}{SOH}".encode("ascii"))
         self._raw = bytes(result)
         return self._raw
 
     def body_length(self) -> int:
         """Calculate body length for current message state."""
-        # Body is everything between BodyLength and CheckSum tags
+        # Body is everything from tag 35 to before tag 10
         body_parts = []
         for tag, value in self._tags.items():
-            if tag in (9, 10):
+            if tag in (8, 9, 10):
                 continue
             body_parts.append(f"{tag}={value}{SOH}")
 
@@ -230,13 +236,7 @@ class FIXMessage:
 
     def checksum(self) -> int:
         """Calculate checksum for current message state."""
-        raw = self.serialize()
-        # Checksum is sum of all bytes before tag 10
-        # Find position of 10=
-        idx = raw.rfind(b"10=")
-        if idx == -1:
-            return 0
-        return sum(raw[:idx]) % 256
+        return self._calculate_checksum(self._build_body_bytes())
 
     def copy(self) -> FIXMessage:
         """Create a copy of this message."""
