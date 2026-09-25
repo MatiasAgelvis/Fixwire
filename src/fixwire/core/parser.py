@@ -37,6 +37,8 @@ class FIXParser:
 
     Parses raw FIX byte stream into FIXMessage objects.
 
+    Args:
+        strict: If True, enables strict validation of checksum and message size.
     Usage:
         parser = FIXParser()
         messages = parser.parse(raw_bytes)
@@ -44,9 +46,19 @@ class FIXParser:
             print(msg.msg_type, msg.sender, msg.target)
     """
 
-    def __init__(self) -> None:
+    def __init__(self, strict: bool = True) -> None:
         self._buffer = bytearray()
-        self._strict_mode = True  # Enable strict validation
+        self._strict = strict  # Enable strict validation
+
+    @property
+    def strict(self) -> bool:
+        """Get strict mode status."""
+        return self._strict
+
+    @strict.setter
+    def strict(self, value: bool) -> None:
+        """Set strict mode status."""
+        self._strict = value
 
     def parse(self, data: bytes) -> list[FIXMessage]:
         """Parse raw data into FIX messages.
@@ -140,7 +152,7 @@ class FIXParser:
         try:
             return self._parse_message(raw_msg)
         except FIXParseError as e:
-            if self._strict_mode:
+            if self._strict:
                 raise
             logger.warning("parse.error", error=str(e), raw=raw_msg[:100])
             return None
@@ -177,7 +189,7 @@ class FIXParser:
 
         if tag == 10:  # CheckSum
             msg[10] = value
-            self.validate_checksum(raw)
+            self.validate_checksum(raw)  # Raises in strict, returns bool in non-strict
             return 0, False
 
         return None
@@ -263,7 +275,7 @@ class FIXParser:
 
             # Parse tag=value
             if "=" not in field:
-                if self._strict_mode:
+                if self._strict:
                     raise FIXParseError(
                         f"Invalid field format: {field}",
                         raw=raw
@@ -274,7 +286,7 @@ class FIXParser:
                 tag_str, value = field.split("=", 1)
                 tag = int(tag_str)
             except ValueError as err:
-                if self._strict_mode:
+                if self._strict:
                     raise FIXParseError(
                         f"Invalid field: {field!r}",
                         raw=raw
@@ -324,7 +336,7 @@ class FIXParser:
         # Find position of 10=
         idx = raw.rfind(b"10=")
         if idx == -1:
-            if self._strict_mode:
+            if self._strict:
                 raise FIXParseError("No checksum tag found", raw=raw)
             logger.warning("parser.no_checksum", raw=raw[:50])
             return False
@@ -336,13 +348,13 @@ class FIXParser:
         try:
             extracted = int(raw[idx + 3:idx + 6])
         except (ValueError, IndexError):
-            if self._strict_mode:
+            if self._strict:
                 raise FIXParseError("Invalid checksum format", raw=raw, tag=10) from None
             logger.warning("parser.invalid_checksum_format", raw=raw[:50])
             return False
 
         if calculated != extracted:
-            if self._strict_mode:
+            if self._strict:
                 raise FIXParseError(
                     f"Checksum mismatch: calculated={calculated}, expected={extracted}",
                     raw=raw,
