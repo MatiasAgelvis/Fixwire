@@ -14,9 +14,9 @@ from typing import Any
 
 import structlog
 
+from fixwire.core.factory import FIXMessageFactory
 from fixwire.core.message import FIXMessage
 from fixwire.core.parser import FIXParser
-from fixwire.core.serializer import FIXSerializer
 
 logger = structlog.get_logger()
 
@@ -73,7 +73,7 @@ class FIXSession:
     def __init__(self, config: SessionConfig) -> None:
         self.config = config
         self.parser = FIXParser()
-        self.serializer = FIXSerializer()
+        self.factory = FIXMessageFactory()
         self._state = _SessionState()
         self._send_queue: asyncio.Queue[FIXMessage] = asyncio.Queue()
         self._receive_callbacks: list[Callable[[FIXMessage], Any]] = []
