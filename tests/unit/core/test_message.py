@@ -51,7 +51,7 @@ class TestFIXMessageCreation:
         d = {"35": "D", "49": "CLIENT"}
 
         # Act
-        msg = FIXMessage.from_dict(d)
+        msg = FIXMessage.from_dict(d)  # pyright: ignore[reportArgumentType]
 
         # Assert
         assert isinstance(msg[35], str)

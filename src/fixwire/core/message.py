@@ -262,10 +262,10 @@ class FIXMessage:
         return "\n".join(parts)
 
     @classmethod
-    def from_dict(cls, data: dict[int | str, int | str]) -> FIXMessage:
+    def from_dict(cls, data: dict[int, str]) -> FIXMessage:
         """Create message from dictionary.
 
-        Accepts both int and string keys/values, casting to int/str.
+        Note: Accepts string keys at runtime (cast to int), but not type-safe.
         """
         msg = cls()
         for tag, value in data.items():
