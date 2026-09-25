@@ -81,6 +81,35 @@ class FIXParser:
 
         return messages
 
+    def _handle_no_fix_start(self) -> FIXMessage | None:
+        """Handle buffer that doesn't start with 8=FIX.
+
+        Returns:
+            None always (no valid message found)
+        """
+        # Check for invalid BeginString (8=non-FIX)
+        if len(self._buffer) > 3 and self._buffer[:2] == b"8=":
+            if self._strict:
+                begin_string = self._buffer.split(SOH.encode())[0].decode(errors="replace")
+                raise FIXParseError(
+                    f"Invalid BeginString: {begin_string}",
+                    raw=bytes(self._buffer),
+                    tag=8
+                )
+            logger.warning("parser.invalid_begin_string", raw=bytes(self._buffer[:50]))
+            # Skip to next SOH and continue
+            next_soh = self._buffer.find(SOH.encode())
+            if next_soh != -1:
+                self._buffer = self._buffer[next_soh + 1:]
+            else:
+                self._buffer.clear()
+            return None
+
+        # Keep only last few bytes for partial message detection
+        if len(self._buffer) > 10:
+            self._buffer = self._buffer[-10:]
+        return None
+
     def _try_parse_message(self) -> FIXMessage | None:
         """Try to parse a single message from buffer.
 
@@ -90,10 +119,7 @@ class FIXParser:
         # Find start of message (8=FIX)
         start = self._buffer.find(b"8=FIX")
         if start == -1:
-            # No message start found, keep only last few bytes
-            if len(self._buffer) > 10:
-                self._buffer = self._buffer[-10:]
-            return None
+            return self._handle_no_fix_start()
 
         # Discard any data before message start
         if start > 0:
