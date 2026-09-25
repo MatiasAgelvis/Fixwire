@@ -194,6 +194,36 @@ class FIXParser:
 
         return None
 
+    def _validate_required_tags(self, msg: FIXMessage, raw: bytes) -> None:
+        """Validate that required tags are present.
+
+        Args:
+            msg: Parsed message.
+            raw: Raw message bytes (for error reporting).
+
+        Raises:
+            FIXParseError: If required tag is missing.
+        """
+        # Always required tags
+        required_tags = [
+            (8, "BeginString"),
+            (9, "BodyLength"),
+            (35, "MsgType"),
+            (49, "SenderCompID"),
+            (56, "TargetCompID"),
+            (34, "MsgSeqNum"),
+            (52, "SendingTime"),
+            (10, "CheckSum"),
+        ]
+
+        for tag, name in required_tags:
+            if not msg.has(tag):
+                raise FIXParseError(
+                    f"Missing required tag: {name} ({tag})",
+                    raw=raw,
+                    tag=tag
+                )
+
     def _find_message_end(self) -> int:
         """Find the end of a FIX message in the buffer.
 
@@ -313,6 +343,10 @@ class FIXParser:
 
         if tag_count == 0:
             raise FIXParseError("Empty message", raw=raw)
+
+        # Validate required tags
+        if self._strict:
+            self._validate_required_tags(msg, raw)
 
         return msg
 
