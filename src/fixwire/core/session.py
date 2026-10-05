@@ -205,11 +205,13 @@ class FIXSession:
             self.status = SessionStatus.WAITING_LOGON
             self._state.incoming_seq_num = msg.sequence - 1
 
-            # Send logon response
-            response = FIXMessage()
-            response.msg_type = "A"
-            response.set(98, "0")
-            response.set(108, str(self.config.heartbeat_interval))
+            # Send logon response using factory
+            response = FIXMessageFactory.create_logon(
+                sender=self.config.sender_comp_id,
+                target=self.config.target_comp_id,
+                seq=0,  # Will be set by send()
+                heartbeat_interval=self.config.heartbeat_interval
+            )
             await self.send(response)
 
             self.status = SessionStatus.LOGGED_ON
@@ -246,9 +248,12 @@ class FIXSession:
         test_req_id = msg.get(112)
         if test_req_id:
             # Respond with Heartbeat containing TestReqID
-            heartbeat = FIXMessage()
-            heartbeat.msg_type = "0"
-            heartbeat.set(112, test_req_id)
+            heartbeat = FIXMessageFactory.create_heartbeat(
+                sender=self.config.sender_comp_id,
+                target=self.config.target_comp_id,
+                seq=0,  # Will be set by send()
+                test_req_id=test_req_id
+            )
             await self.send(heartbeat)
 
     async def _handle_resend_request(self, msg: FIXMessage) -> None:
@@ -302,17 +307,18 @@ class FIXSession:
         self._state.outgoing_seq_num = 0
         self._state.incoming_seq_num = 0
 
-        # Send logon
-        logon = FIXMessage()
-        logon.msg_type = "A"
-        logon.set(98, "0")
-        logon.set(108, str(self.config.heartbeat_interval))
-
         if self.config.reset_seq_num:
-            logon.set(141, "Y")
             self._state.outgoing_seq_num = 0
             self._state.incoming_seq_num = 0
 
+        # Send logon using factory
+        logon = FIXMessageFactory.create_logon(
+            sender=self.config.sender_comp_id,
+            target=self.config.target_comp_id,
+            seq=0,  # Will be set by send()
+            heartbeat_interval=self.config.heartbeat_interval,
+            reset_seq_num=self.config.reset_seq_num
+        )
         await self.send(logon)
         self.status = SessionStatus.WAITING_LOGON
 
@@ -327,9 +333,12 @@ class FIXSession:
 
         self.status = SessionStatus.WAITING_LOGOUT
 
-        # Send logout
-        logout = FIXMessage()
-        logout.msg_type = "5"
+        # Send logout using factory
+        logout = FIXMessageFactory.create_logout(
+            sender=self.config.sender_comp_id,
+            target=self.config.target_comp_id,
+            seq=0  # Will be set by send()
+        )
         await self.send(logout)
 
         # Stop heartbeat monitor
