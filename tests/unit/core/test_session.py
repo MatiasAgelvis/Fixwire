@@ -8,8 +8,8 @@ from fixwire.core.session import FIXSession, SessionConfig, SessionStatus
 
 @pytest.fixture
 def session() -> FIXSession:
-    """Create a test session."""
-    config = SessionConfig(sender_comp_id="C", target_comp_id="S")
+    """Create a test session (CLIENT sending to SERVER)."""
+    config = SessionConfig(sender_comp_id="CLIENT", target_comp_id="SERVER")
     return FIXSession(config)
 
 
@@ -32,8 +32,8 @@ class TestFIXSessionSequenceNumbers:
     async def test_next_seq_num_increments(self, session):
         """Test that sequence numbers increment via send()."""
         # Act: send two heartbeat messages
-        msg1 = FIXMessageFactory.create_heartbeat("C", "S", 0)
-        msg2 = FIXMessageFactory.create_heartbeat("C", "S", 0)
+        msg1 = FIXMessageFactory.create_heartbeat("CLIENT", "SERVER", 0)
+        msg2 = FIXMessageFactory.create_heartbeat("CLIENT", "SERVER", 0)
         await session.send(msg1)
         await session.send(msg2)
 
@@ -96,13 +96,11 @@ class TestFIXSessionMessageHandling:
     async def test_receive_heartbeat_clears_test_request(self, session):
         """Test that receiving heartbeat response clears test request state."""
         # Arrange
-
-        # Simulate pending test request
         session._state.test_request_id = "TEST-123"
 
         # Create heartbeat response using factory
         heartbeat = FIXMessageFactory.create_heartbeat(
-            sender="S", target="C", seq=1, test_req_id="TEST-123"
+            sender="SERVER", target="CLIENT", seq=1, test_req_id="TEST-123"
         )
         raw = heartbeat.serialize()
 
