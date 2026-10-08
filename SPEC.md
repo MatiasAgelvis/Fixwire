@@ -1145,6 +1145,46 @@ class ErrorResponse(BaseModel):
     # }
 ```
 
+## Transport Layer Design
+
+### Protocol (Structural Subtyping)
+
+We use Python's `Protocol` for the transport interface. No inheritance required — just implement the methods:
+
+```python
+from typing import Protocol
+
+class Transport(Protocol):
+    async def send(self, data: bytes) -> None: ...
+    async def receive(self) -> bytes: ...
+    async def close(self) -> None: ...
+    @property
+    def is_connected(self) -> bool: ...
+```
+
+**Why Protocol?**
+- No inheritance required — duck typing with type safety
+- More Pythonic than ABC
+- Works with existing classes
+- Type checker enforces contract
+
+**Implementations:**
+- `WebSocketTransport` — WebSocket-based
+- `TCPTransport` — Raw TCP sockets (future)
+
+**Usage:**
+```python
+# Inject transport into session
+transport = WebSocketTransport("ws://localhost:8001")
+session = FIXSession(config, transport=transport)
+
+# Or with TCP later
+transport = TCPTransport("localhost", 9000)
+session = FIXSession(config, transport=transport)
+```
+
+---
+
 ## Testing Methodology
 
 ### Philosophy: TDD First
