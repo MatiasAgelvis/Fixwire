@@ -296,11 +296,16 @@ class WebSocketTransportAdapter:
             raise ConnectionError(f"Failed to receive: {e}") from e
 
     async def close(self) -> None:
-        """Close the connection."""
-        if self._connected:
-            try:
-                await self._ws.close()
-            except Exception as e:
-                logger.warning("transport.ws.close_error", error=str(e))
-            finally:
-                self._connected = False
+        """Close the connection (idempotent).
+
+        Calling close() on an already-closed adapter is a no-op.
+        """
+        try:
+            await self._connection.close()
+        except ConnectionError:
+            # Already disconnected — close is idempotent
+            pass
+        except Exception as e:
+            logger.warning("transport.ws.close_error", error=str(e))
+        finally:
+            self._connected = False
