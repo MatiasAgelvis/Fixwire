@@ -282,6 +282,9 @@ class WebSocketTransportAdapter:
 
         Args:
             data: Raw FIX message bytes.
+
+        Raises:
+            ConnectionError: If not connected or send fails.
         """
         try:
             await self._connection.send(data)
@@ -294,6 +297,9 @@ class WebSocketTransportAdapter:
 
         Returns:
             Raw FIX message bytes.
+
+        Raises:
+            ConnectionError: If not connected, receive fails, or frame is text.
         """
         try:
             data = await self._connection.recv()
