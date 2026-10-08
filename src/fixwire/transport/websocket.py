@@ -10,7 +10,7 @@ from collections.abc import Callable
 
 import structlog
 import websockets
-from websockets.asyncio.client import connect
+from websockets.asyncio.client import ClientConnection, connect
 from websockets.asyncio.server import ServerConnection, serve
 
 logger = structlog.get_logger()
@@ -46,6 +46,11 @@ class WebSocketTransport:
         await transport.close()
     """
 
+    # Class-level annotations let tests bypass __init__ via __new__
+    # and still set attributes in a type-safe way.
+    _ws: ClientConnection | None
+    _connected: bool
+
     def __init__(self, url: str, timeout: float = 30.0) -> None:
         """Initialize WebSocket client transport.
 
@@ -64,8 +69,12 @@ class WebSocketTransport:
         return self._connected and self._ws is not None
 
     @property
-    def _connection(self):
-        """Get the WebSocket connection, raising if not connected."""
+    def _connection(self) -> ClientConnection:
+        """Get the WebSocket connection, raising if not connected.
+
+        Returns the active ClientConnection narrowed away from None,
+        so callers can use it without further None checks.
+        """
         if self._ws is None:
             raise ConnectionError("Transport not connected")
         return self._ws
@@ -124,16 +133,18 @@ class WebSocketTransport:
             raise ConnectionError(f"Failed to receive: {e}") from e
 
     async def close(self) -> None:
-        """Close the WebSocket connection."""
-        if self._ws:
-            try:
-                await self._ws.close()
-            except Exception as e:
-                logger.warning("transport.ws.close_error", error=str(e))
-            finally:
-                self._connected = False
-                self._ws = None
-                logger.info("transport.ws.closed", url=self.url)
+        """Close the WebSocket connection (idempotent)."""
+        try:
+            await self._connection.close()
+        except ConnectionError:
+            # Already disconnected — close is idempotent.
+            pass
+        except Exception as e:
+            logger.warning("transport.ws.close_error", error=str(e))
+        finally:
+            self._connected = False
+            self._ws = None
+            logger.info("transport.ws.closed", url=self.url)
 
 
 
