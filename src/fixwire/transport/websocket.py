@@ -249,13 +249,16 @@ class WebSocketTransportAdapter:
             # ... use session
     """
 
+    _ws: ServerConnection | None
+    _connected: bool
+
     def __init__(self, ws: ServerConnection) -> None:
         """Initialize adapter with WebSocket connection.
 
         Args:
             ws: WebSocket server connection.
         """
-        self._ws: ServerConnection | None = ws
+        self._ws = ws
         self._connected = True
 
     @property
