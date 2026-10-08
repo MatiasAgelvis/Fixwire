@@ -267,9 +267,13 @@ class WebSocketTransportAdapter:
         return self._connected
 
     @property
-    def _connection(self):
-        """Get the WebSocket connection, raising if not connected."""
-        if not self._connected:
+    def _connection(self) -> ServerConnection:
+        """Get the WebSocket connection, raising if not connected.
+
+        Returns the active ServerConnection narrowed away from None,
+        so callers can use it without further None checks.
+        """
+        if not self._connected or self._ws is None:
             raise ConnectionError("Transport not connected")
         return self._ws
 
