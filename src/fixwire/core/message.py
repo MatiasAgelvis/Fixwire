@@ -12,6 +12,7 @@ from typing import Any
 
 from fixwire.core.constants import SOH
 from fixwire.core.tags import get_tag_name
+from fixwire.core.time import utc_now
 
 
 class FIXMessage:
@@ -183,7 +184,7 @@ class FIXMessage:
         """
         # Set sending time if not set
         if 52 not in self._tags:
-            self.sending_time = datetime.now()
+            self.sending_time = utc_now()
 
         # Build body (everything except BeginString, BodyLength, CheckSum)
         body_parts = []
