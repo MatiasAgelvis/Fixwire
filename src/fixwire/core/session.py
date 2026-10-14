@@ -17,6 +17,7 @@ import structlog
 from fixwire.core.factory import FIXMessageFactory
 from fixwire.core.message import FIXMessage
 from fixwire.core.parser import FIXParser
+from fixwire.core.time import utc_now
 
 logger = structlog.get_logger()
 
@@ -77,8 +78,6 @@ class FIXSession:
         self._state = _SessionState()
         self._send_queue: asyncio.Queue[FIXMessage] = asyncio.Queue()
         self._receive_callbacks: list[Callable[[FIXMessage], Any]] = []
-        self._heartbeat_task: asyncio.Task | None = None
-        self._connect_task: asyncio.Task | None = None
 
     @property
     def is_connected(self) -> bool:
@@ -121,12 +120,12 @@ class FIXSession:
         msg.sender = self.config.sender_comp_id
         msg.target = self.config.target_comp_id
         msg.sequence = self._next_seq_num()
-        msg.sending_time = datetime.utcnow()
+        msg.sending_time = utc_now()
 
         # Serialize and queue for sending
         await self._send_queue.put(msg)
 
-        self._state.last_sent_time = datetime.utcnow()
+        self._state.last_sent_time = utc_now()
         logger.debug("session.message_sent",
                     msg_type=msg.msg_type,
                     seq=msg.sequence)
@@ -157,7 +156,7 @@ class FIXSession:
         Args:
             msg: Parsed FIX message.
         """
-        self._state.last_received_time = datetime.utcnow()
+        self._state.last_received_time = utc_now()
         msg_type = msg.msg_type
 
         logger.debug("session.message_received",
@@ -196,7 +195,7 @@ class FIXSession:
         if self.status == SessionStatus.WAITING_LOGON:
             # We initiated logon, received response
             self.status = SessionStatus.LOGGED_ON
-            self._state.logon_time = datetime.utcnow()
+            self._state.logon_time = utc_now()
             logger.info("session.logon_success",
                        sender=self.config.sender_comp_id,
                        target=self.config.target_comp_id)
@@ -215,7 +214,7 @@ class FIXSession:
             await self.send(response)
 
             self.status = SessionStatus.LOGGED_ON
-            self._state.logon_time = datetime.utcnow()
+            self._state.logon_time = utc_now()
             logger.info("session.logon_received",
                        sender=msg.sender,
                        target=msg.target)
@@ -322,9 +321,6 @@ class FIXSession:
         await self.send(logon)
         self.status = SessionStatus.WAITING_LOGON
 
-        # Start heartbeat monitor
-        self._start_heartbeat_monitor()
-
     async def disconnect(self) -> None:
         """Initiate session logout and disconnect."""
         if self.status != SessionStatus.LOGGED_ON:
@@ -341,9 +337,6 @@ class FIXSession:
         )
         await self.send(logout)
 
-        # Stop heartbeat monitor
-        self._stop_heartbeat_monitor()
-
         # Wait for logout response or timeout
         try:
             await asyncio.wait_for(
@@ -359,48 +352,40 @@ class FIXSession:
         while self.status != target_status:
             await asyncio.sleep(0.1)
 
-    def _start_heartbeat_monitor(self) -> None:
-        """Start heartbeat monitoring task."""
-        self._heartbeat_task = asyncio.create_task(self._heartbeat_monitor())
+    async def check_heartbeat(self) -> None:
+        """Run one heartbeat check: probe silent peers, escalate on timeout.
 
-    def _stop_heartbeat_monitor(self) -> None:
-        """Stop heartbeat monitoring task."""
-        if self._heartbeat_task:
-            self._heartbeat_task.cancel()
-            self._heartbeat_task = None
+        Pure protocol decision — no timers. FIXEngine calls this on its
+        heartbeat task on a fixed interval.
+        """
+        if self.status != SessionStatus.LOGGED_ON:
+            return
 
-    async def _heartbeat_monitor(self) -> None:
-        """Monitor heartbeats and send test requests if needed."""
-        while True:
-            await asyncio.sleep(self.config.heartbeat_interval)
+        # Check if we received anything recently
+        now = utc_now()
+        if self._state.last_received_time:
+            time_since_last = (now - self._state.last_received_time).total_seconds()
+        else:
+            time_since_last = self.config.heartbeat_interval * 2
 
-            if self.status != SessionStatus.LOGGED_ON:
-                break
+        if time_since_last < self.config.heartbeat_interval:
+            return
 
-            # Check if we received anything recently
-            now = datetime.utcnow()
-            if self._state.last_received_time:
-                time_since_last = (now - self._state.last_received_time).total_seconds()
-            else:
-                time_since_last = self.config.heartbeat_interval * 2
+        if self._state.test_request_id:
+            # Previous test request not answered
+            logger.warning("session.heartbeat_timeout")
+            self.status = SessionStatus.ERROR
+            return
 
-            # Send TestRequest if no messages received
-            if time_since_last >= self.config.heartbeat_interval:
-                if self._state.test_request_id:
-                    # Previous test request not answered
-                    logger.warning("session.heartbeat_timeout")
-                    self.status = SessionStatus.ERROR
-                    break
+        # Send test request
+        test_req_id = f"{self.config.sender_comp_id}-{int(now.timestamp())}"
+        self._state.test_request_id = test_req_id
+        self._state.test_request_time = now
 
-                # Send test request
-                test_req_id = f"{self.config.sender_comp_id}-{int(now.timestamp())}"
-                self._state.test_request_id = test_req_id
-                self._state.test_request_time = now
-
-                test_req = FIXMessage()
-                test_req.msg_type = "1"
-                test_req.set(112, test_req_id)
-                await self.send(test_req)
+        test_req = FIXMessage()
+        test_req.msg_type = "1"
+        test_req.set(112, test_req_id)
+        await self.send(test_req)
 
     def get_next_expected_seq_num(self) -> int:
         """Get next expected incoming sequence number."""
