@@ -7,11 +7,15 @@ from __future__ import annotations
 
 import asyncio
 from collections.abc import Callable
+from typing import TYPE_CHECKING
 
 import structlog
 import websockets
 from websockets.asyncio.client import ClientConnection, connect
 from websockets.asyncio.server import ServerConnection, serve
+
+if TYPE_CHECKING:
+    from fixwire.transport import Transport
 
 logger = structlog.get_logger()
 
@@ -146,6 +150,10 @@ class WebSocketTransport:
             self._ws = None
             logger.info("transport.ws.closed", url=self.url)
 
+
+# Type-level proof that WebSocketTransport satisfies the Transport Protocol.
+if TYPE_CHECKING:
+    _transport_conformance: Transport = WebSocketTransport("ws://localhost:1")
 
 
 class WebSocketServer:
