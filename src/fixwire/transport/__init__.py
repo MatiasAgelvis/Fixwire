@@ -7,6 +7,11 @@ from __future__ import annotations
 
 from typing import Protocol
 
+from fixwire.transport.memory import InMemoryTransport
+from fixwire.transport.websocket import WebSocketTransport
+
+__all__ = ["Transport", "InMemoryTransport", "WebSocketTransport"]
+
 
 class Transport(Protocol):
     """Transport protocol for FIX messages.
