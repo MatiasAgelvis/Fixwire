@@ -130,10 +130,6 @@ class FIXSession:
                     msg_type=msg.msg_type,
                     seq=msg.sequence)
 
-    async def send_raw(self, raw: bytes) -> None:
-        """Send raw bytes (for serialization-only messages)."""
-        await self._send_queue.put(raw)  # type: ignore
-
     async def receive(self, data: bytes) -> list[FIXMessage]:
         """Process received raw data.
 
