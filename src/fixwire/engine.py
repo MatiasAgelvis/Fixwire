@@ -190,6 +190,28 @@ class FIXEngine:
         except Exception as e:
             raise ConnectionError(f"transport.send failed: {e}") from e
 
+    async def _reader_loop(self) -> None:
+        """Drain transport.receive(), feed session.receive().
+
+        Symmetric with the writer: the receive is bounded by ``_IDLE_POLL``
+        so the reader can wake up and observe ``_stop_event`` without
+        depending on the transport closing. Any exception other than the
+        idle-poll timeout is routed through ``_handle_task_error``, which
+        decides whether to escalate to ERROR or treat as clean shutdown.
+        """
+        while not self._stop_event.is_set():
+            try:
+                data = await asyncio.wait_for(
+                    self._transport.receive(),
+                    timeout=_IDLE_POLL,
+                )
+                await self._session.receive(data)
+            except TimeoutError:
+                continue
+            except Exception as e:
+                await self._handle_task_error("reader", e)
+                return
+
     async def _handle_task_error(self, task_name: str, error: Exception) -> None:
         """Move the session to ERROR, close the transport,
         and signal the engine to stop.
