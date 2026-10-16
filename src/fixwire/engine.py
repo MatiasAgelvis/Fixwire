@@ -46,8 +46,63 @@ class FIXEngine:
     # --- Lifecycle ---
 
     async def connect(self) -> None:
-        """Open transport, spawn I/O tasks, run session logon."""
-        raise NotImplementedError
+        """Open transport, spawn I/O tasks, run session logon.
+
+        Order of operations:
+        1. ``await transport.connect()`` — open the wire.
+        2. ``start()`` — spawn the writer and reader tasks.
+        3. ``session.connect()`` — put a Logon on the queue.
+        4. Wait for ``session.status == LOGGED_ON``, bounded by
+           ``session.config.logon_timeout``.
+
+        Idempotent: a second call is a no-op once the engine is running.
+
+        Raises:
+            ConnectionError: Transport could not be opened, or the logon
+                handshake failed (e.g. malformed peer response, peer
+                moved the session to ERROR).
+            TimeoutError: The peer did not complete the logon handshake
+                within ``session.config.logon_timeout``.
+        """
+        if self._writer_task is not None:
+            return
+
+        try:
+            await self._transport.connect()
+            await self.start()
+            await self._session.connect()
+            await asyncio.wait_for(
+                self._wait_for_logon(),
+                timeout=self._session.config.logon_timeout,
+            )
+        except TimeoutError as e:
+            await self._teardown_after_failed_connect()
+            raise TimeoutError(
+                f"Logon handshake did not complete within "
+                f"{self._session.config.logon_timeout}s"
+            ) from e
+        except Exception:
+            await self._teardown_after_failed_connect()
+            raise
+
+    async def _wait_for_logon(self) -> None:
+        """Poll until the session reaches LOGGED_ON or fails.
+
+        Treats any non-LOGGED_ON terminal state (ERROR) as a failure so
+        the caller surfaces a ConnectionError rather than waiting for the
+        logon timeout to fire.
+        """
+        while self._session.status == SessionStatus.WAITING_LOGON:
+            await asyncio.sleep(0.01)
+        if self._session.status != SessionStatus.LOGGED_ON:
+            raise ConnectionError(
+                f"Logon handshake failed; session.status="
+                f"{self._session.status.value}"
+            )
+
+    async def _teardown_after_failed_connect(self) -> None:
+        """Tear down engine state after ``connect()`` fails. Idempotent."""
+        await self.stop()
 
     async def disconnect(self) -> None:
         """Run session logout, stop tasks, close transport. Idempotent."""
