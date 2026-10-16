@@ -498,8 +498,9 @@ class TestFIXEngineReaderTask:
     ):
         """When session.receive() raises on malformed bytes, the reader's
         task guard sets session.status = ERROR."""
-        # Arrange
-        transport.feed(b"not a fix message\x01")
+        # Arrange: feed bytes that start with '8=' but aren't a valid FIX
+        # message — this triggers the strict-mode BeginString check.
+        transport.feed(b"8=NOPE\x01")
 
         # Act
         await engine.start()
@@ -568,11 +569,12 @@ class TestFIXEngineCoordination:
 
         # Act
         await engine.connect()
-        await session.send(msg)
-        await _drain_writer(engine)
+        await session.send(msg)  # assigns msg.sequence (incremented past the Logon)
+        msg_bytes = msg.serialize()
+        await _wait_for_sent(transport, msg_bytes)
 
         # Assert
-        assert msg.serialize() in transport.sent
+        assert msg_bytes in transport.sent
 
     @pytest.mark.asyncio
     async def test_after_connect_reader_processes_inbound_message(
