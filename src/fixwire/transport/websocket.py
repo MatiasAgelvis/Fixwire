@@ -288,7 +288,7 @@ class WebSocketTransportAdapter:
         satisfy the ``Transport`` protocol and to give the engine a single
         uniform entry point.
         """
-        self._connected = True
+        pass
 
     @property
     def is_connected(self) -> bool:
