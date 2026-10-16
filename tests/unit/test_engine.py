@@ -601,18 +601,24 @@ class TestFIXEngineCoordination:
         assert session._state.test_request_id is None
 
 
-async def _drain_writer(engine: FIXEngine) -> None:
-    """Wait until the writer task has drained the session queue.
+async def _drain_writer(engine: FIXEngine, timeout: float = 2.0) -> None:
+    """Wait until the session queue is empty and the writer has had a
+    chance to flush the last message.
 
-    Gives the event loop a few turns to process queued messages plus a
-    settle window so callers don't race the task.
+    Polls the queue with a 10ms sleep until empty, then yields a few extra
+    turns so serialize() + transport.send() can complete. The previous
+    "yield 4 times" version was racy once a reader was running alongside
+    the writer (event loop scheduling wasn't deterministic enough).
     """
-    # Wake the writer up to four times so it gets every queued item.
-    for _ in range(4):
-        if engine._session._send_queue.empty():
-            break
+    deadline = asyncio.get_event_loop().time() + timeout
+    while not engine._session._send_queue.empty():
+        if asyncio.get_event_loop().time() > deadline:
+            return
+        await asyncio.sleep(0.01)
+    # Queue is empty; give the writer a few turns to finish serializing
+    # and hitting the transport.
+    for _ in range(5):
         await asyncio.sleep(0)
-    await asyncio.sleep(0)  # let the final put_nowait() in serialize() settle
 
 
 async def _drain_reader(engine: FIXEngine, turns: int = 4) -> None:
