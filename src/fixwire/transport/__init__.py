@@ -7,6 +7,11 @@ from __future__ import annotations
 
 from typing import Protocol
 
+from fixwire.transport.memory import InMemoryTransport
+from fixwire.transport.websocket import WebSocketTransport
+
+__all__ = ["Transport", "InMemoryTransport", "WebSocketTransport"]
+
 
 class Transport(Protocol):
     """Transport protocol for FIX messages.
@@ -16,11 +21,21 @@ class Transport(Protocol):
 
     Usage:
         class MyTransport:
+            async def connect(self) -> None: ...
             async def send(self, data: bytes) -> None: ...
             async def receive(self) -> bytes: ...
 
-        session = FIXSession(config, transport=MyTransport())
+            session = FIXSession(config, transport=MyTransport())
     """
+
+    async def connect(self) -> None:
+        """Open the transport connection to the remote endpoint.
+
+        Raises:
+            ConnectionError: If the connection cannot be established.
+            TimeoutError: If the connection attempt times out.
+        """
+        ...
 
     async def send(self, data: bytes) -> None:
         """Send raw bytes to the remote endpoint.

@@ -7,11 +7,15 @@ from __future__ import annotations
 
 import asyncio
 from collections.abc import Callable
+from typing import TYPE_CHECKING
 
 import structlog
 import websockets
 from websockets.asyncio.client import ClientConnection, connect
 from websockets.asyncio.server import ServerConnection, serve
+
+if TYPE_CHECKING:
+    from fixwire.transport import Transport
 
 logger = structlog.get_logger()
 
@@ -147,6 +151,10 @@ class WebSocketTransport:
             logger.info("transport.ws.closed", url=self.url)
 
 
+# Type-level proof that WebSocketTransport satisfies the Transport Protocol.
+if TYPE_CHECKING:
+    _transport_conformance: Transport = WebSocketTransport("ws://localhost:1")
+
 
 class WebSocketServer:
     """WebSocket server for accepting FIX connections.
@@ -271,6 +279,16 @@ class WebSocketTransportAdapter:
         """
         self._ws = ws
         self._connected = True
+
+    async def connect(self) -> None:
+        """No-op: the adapter wraps an already-accepted server connection.
+
+        The WebSocketServer hands us an open ``ServerConnection`` on each
+        accepted client, so there's nothing to dial. The method exists to
+        satisfy the ``Transport`` protocol and to give the engine a single
+        uniform entry point.
+        """
+        pass
 
     @property
     def is_connected(self) -> bool:

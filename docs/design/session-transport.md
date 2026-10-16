@@ -46,7 +46,7 @@ graph TD
         E1["Lifecycle orchestrator"]
         E2["Writer task (outbound drain)"]
         E3["Reader task (inbound drain)"]
-        E4["Bounded inbound queue"]
+        E4["Task guards (_safe_*)"]
         E5["Status & error mapping"]
     end
 
@@ -108,7 +108,7 @@ These are the decisions we committed to after working through the alternatives. 
 
 **Why not pull-only:** `receive()` would only fire when the caller asks, breaking the real-time semantics of FIX and forcing every consumer to implement their own polling loop.
 
-**Why not bounded inbound queue at v1:** considered. Decision lands on **push with task guards** for M1 because (a) handlers in our code are fast, (b) the OS socket buffer is the natural backpressure boundary, and (c) keep M1 diff small. **A bounded inbound queue is a v1.x / M3 candidate** if real workloads require it — see the roadmap below.
+**Why not bounded inbound queue at v1:** considered. The deciding constraint is FIX's absolute integrity invariant — **messages are never dropped** — so a full bounded queue can only block the reader (which is push with a larger buffer) or fail the session. Either way the queue is a latency shock absorber and a policy point, not a correctness mechanism; backpressure ultimately lands at the socket, where TCP slows the peer and no message is ever lost or reordered. Decision lands on **push with task guards** for M1 to keep the diff small while the engine itself is being invented. **The bounded inbound queue is a scheduled M3 deliverable** (queue-full policy: block with timeout → `ERROR`, never drop) — see the roadmap below.
 
 ### Decision 4 — Error handling: strict by default; retries configurable later
 
@@ -351,8 +351,8 @@ State transitions remain in `FIXSession`; `FIXEngine` only reads `session.status
 | Transport dropped mid-session | Reader task catches | Log, set `ERROR`, cancel siblings, close transport | Same | `ERROR` |
 | `FIXParseError` (bad checksum, malformed) | Inside `session.receive` | Raise → reader task catches → `ERROR` | Log + drop message | unchanged (non-strict) or `ERROR` (strict) |
 | Sequence mismatch (M2) | Inside `session.receive` | Logout | Reject + continue (M2 fix) | unchanged or `ERROR` |
-| Heartbeat timeout | `session._heartbeat_monitor` | Logout (M2) | Same | `ERROR` |
-| TestRequest timeout | `session._heartbeat_monitor` | Disconnect (M2) | Same | `ERROR` |
+| Heartbeat timeout | `FIXEngine` heartbeat task | Logout (M2) | Same | `ERROR` |
+| TestRequest timeout | `FIXEngine` heartbeat task | Disconnect (M2) | Same | `ERROR` |
 | Logon timeout | `engine.connect()` awaits wait | Raise `TimeoutError` | Same | `ERROR` |
 | Logout timeout | `engine.disconnect()` | Force close | Same | `DISCONNECTED` |
 | Unhandled exception in task | Reader/Writer task `_safe_*` wrapper | Log, set `ERROR` | Same | `ERROR` |
@@ -393,7 +393,8 @@ These are intentionally **out of scope for M1** but documented so M2+ contributo
 ### M3 — Resilience (reconnect, persistence, audit)
 - `FIXEngine.reconnect()` with exponential backoff.
 - `SequenceStore` protocol; `FileSequenceStore` default.
-- Bounded inbound queue (if real workloads demand it; current push is fine).
+- Bounded inbound queue — scheduled deliverable. Queue-full policy: block with timeout → `ERROR`, never drop.
+- App callback isolation: `on_message` must never block protocol handling (heartbeat/TestRequest responses); hand off to its own task.
 - Audit logging spec.
 
 ### M4 — Security (WSS, mTLS, no-secret logs)

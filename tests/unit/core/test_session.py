@@ -1,10 +1,15 @@
 """Tests for FIXSession."""
 
+import asyncio
+import inspect
+from datetime import timedelta
+
 import pytest
 
 from fixwire.core.factory import FIXMessageFactory
 from fixwire.core.session import FIXSession, SessionConfig, SessionStatus
 from fixwire.core.tags import MsgType
+from fixwire.core.time import utc_now
 
 
 @pytest.fixture
@@ -24,6 +29,101 @@ class TestFIXSessionCreation:
         assert session.is_connected is False
         assert session.get_next_send_seq_num() == 1
         assert session.get_next_expected_seq_num() == 1
+
+
+class TestFIXSessionPurity:
+    """FIXSession is a pure protocol layer: no transport, no asyncio tasks."""
+
+    def test_constructor_rejects_transport_kwarg(self):
+        """Test that FIXSession does not accept a Transport (engine owns I/O)."""
+        # Arrange
+        config = SessionConfig(sender_comp_id="CLIENT", target_comp_id="SERVER")
+
+        # Act & Assert
+        with pytest.raises(TypeError):
+            FIXSession(config, transport=object())  # type: ignore[call-arg]
+
+    def test_constructor_accepts_only_config(self):
+        """Test that the constructor signature pins the session to protocol concerns."""
+        # Assert
+        params = inspect.signature(FIXSession.__init__).parameters
+        assert set(params) == {"self", "config"}
+
+    @pytest.mark.asyncio
+    async def test_connect_spawns_no_background_tasks(self, session):
+        """Test that connect() creates no asyncio tasks; tasks live in FIXEngine."""
+        # Arrange
+        tasks_before = asyncio.all_tasks()
+
+        # Act
+        await session.connect()
+
+        # Assert
+        assert asyncio.all_tasks() == tasks_before
+
+
+class TestFIXSessionHeartbeatDecision:
+    """Test check_heartbeat() — the protocol decision behind heartbeat monitoring."""
+
+    @pytest.mark.asyncio
+    async def test_noop_when_not_logged_on(self, session):
+        """Test that check_heartbeat() does nothing unless logged on."""
+        # Act
+        await session.check_heartbeat()
+
+        # Assert
+        assert session._send_queue.empty()
+        assert session._state.test_request_id is None
+
+    @pytest.mark.asyncio
+    async def test_noop_when_peer_active(self, session):
+        """Test that a recently active peer triggers nothing."""
+        # Arrange
+        session.status = SessionStatus.LOGGED_ON
+        session._state.last_received_time = utc_now()
+
+        # Act
+        await session.check_heartbeat()
+
+        # Assert
+        assert session._send_queue.empty()
+        assert session._state.test_request_id is None
+
+    @pytest.mark.asyncio
+    async def test_sends_test_request_when_peer_silent(self, session):
+        """Test that a silent peer triggers a TestRequest."""
+        # Arrange
+        session.status = SessionStatus.LOGGED_ON
+        session._state.last_received_time = utc_now() - timedelta(
+            seconds=session.config.heartbeat_interval * 2
+        )
+
+        # Act
+        await session.check_heartbeat()
+
+        # Assert
+        assert not session._send_queue.empty()
+        msg = session._send_queue.get_nowait()
+        assert msg[35] == MsgType.TEST_REQUEST
+        assert session._state.test_request_id == msg[112]
+        assert session._state.test_request_time is not None
+
+    @pytest.mark.asyncio
+    async def test_sets_error_when_test_request_unanswered(self, session):
+        """Test that an unanswered TestRequest escalates to ERROR."""
+        # Arrange
+        session.status = SessionStatus.LOGGED_ON
+        session._state.test_request_id = "PREV-REQ"
+        session._state.last_received_time = utc_now() - timedelta(
+            seconds=session.config.heartbeat_interval * 2
+        )
+
+        # Act
+        await session.check_heartbeat()
+
+        # Assert
+        assert session.status == SessionStatus.ERROR
+        assert session._send_queue.empty()
 
 
 class TestFIXSessionSequenceNumbers:
