@@ -213,23 +213,31 @@ class FIXEngine:
                 return
 
     async def _handle_task_error(self, task_name: str, error: Exception) -> None:
-        """Move the session to ERROR, close the transport,
-        and signal the engine to stop.
+        """Mark the session as ERROR, signal shutdown, and close the
+        transport. Does NOT await the failing task — that would
+        self-deadlock when called from inside the failing task. The outer
+        caller (``connect()`` / ``stop()`` / ``disconnect()``) is
+        responsible for awaiting the tasks.
+
+        If the engine is already shutting down (``_stop_event`` is set),
+        the error is expected — typically the transport closing under us
+        — and we exit without escalating to ERROR.
         """
+        if self._stop_event.is_set():
+            # Clean shutdown: the error is the transport closing under us.
+            return
         logger.error("engine.task_error",
                      task=task_name,
                      error=str(error),
                      sender=self._session.config.sender_comp_id,
                      target=self._session.config.target_comp_id)
         self._session.status = SessionStatus.ERROR
+        self._stop_event.set()
         try:
             await self._transport.close()
         except Exception as close_error:
             logger.warning("engine.close_after_error_failed",
                            error=str(close_error))
-        # Signal sibling tasks (and the reader, when slice 4 lands) to stop.
-        # stop() is idempotent and a no-op if no tasks are running.
-        await self.stop()
 
     async def reconnect(self) -> None:
         """Reconnect with backoff."""
