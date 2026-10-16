@@ -441,6 +441,9 @@ class TestFIXEngineReaderTask:
         # Assert: the test request was cleared by the reader's payload
         assert session._state.test_request_id is None
 
+        # Cleanup: stop the engine so the tasks don't outlive the test
+        await engine.stop()
+
     @pytest.mark.asyncio
     async def test_reader_drains_multiple_messages_in_order(
         self, engine, session, transport
@@ -466,6 +469,9 @@ class TestFIXEngineReaderTask:
 
         # Assert: first id was cleared by the first heartbeat
         assert session._state.test_request_id is None
+
+        # Cleanup: stop the engine so the tasks don't outlive the test
+        await engine.stop()
 
     @pytest.mark.asyncio
     async def test_reader_transport_failure_sets_error_status(
@@ -501,6 +507,9 @@ class TestFIXEngineReaderTask:
 
         # Assert
         assert session.status == SessionStatus.ERROR
+
+        # Cleanup: task guard already called stop(), but be explicit for symmetry
+        await engine.stop()
 
     @pytest.mark.asyncio
     async def test_reader_does_not_set_error_on_clean_stop(
