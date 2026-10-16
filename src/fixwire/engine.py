@@ -136,17 +136,29 @@ class FIXEngine:
     async def stop(self) -> None:
         """Signal I/O tasks to stop and wait for them. Idempotent.
 
-        The writer is woken by setting _stop_event; it finishes any
-        message it already pulled, then returns.
+        The writer is woken by setting ``_stop_event``; it finishes any
+        message it already pulled, then returns. The reader is unblocked
+        by closing the transport, which makes ``transport.receive()``
+        raise — the reader's task guard sees ``_stop_event`` is set and
+        exits cleanly without setting ERROR.
         """
-        if self._writer_task is None:
+        if self._writer_task is None and self._reader_task is None:
             return
         self._stop_event.set()
+        # Close the transport so a reader blocked in receive() wakes up.
         try:
-            await self._writer_task
-        except asyncio.CancelledError:
+            await self._transport.close()
+        except Exception:
             pass
+        for task in (self._writer_task, self._reader_task):
+            if task is None or task.done():
+                continue
+            try:
+                await asyncio.wait_for(task, timeout=1.0)
+            except (TimeoutError, asyncio.CancelledError):
+                task.cancel()
         self._writer_task = None
+        self._reader_task = None
 
     # --- Writer task ---
 
