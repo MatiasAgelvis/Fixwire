@@ -34,6 +34,15 @@ class InMemoryTransport:
         """Deliver inbound bytes as if they arrived from the wire."""
         self._incoming.put_nowait(data)
 
+    async def connect(self) -> None:
+        """No-op: the in-memory transport is always connected on creation.
+
+        Exists to satisfy the ``Transport`` protocol. Re-asserts
+        ``_connected = True`` so a previously-closed transport can be
+        "reconnected" between tests by calling ``connect()`` again.
+        """
+        self._connected = True
+
     async def send(self, data: bytes) -> None:
         """Record outbound bytes.
 

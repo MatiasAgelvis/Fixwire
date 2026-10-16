@@ -21,11 +21,21 @@ class Transport(Protocol):
 
     Usage:
         class MyTransport:
+            async def connect(self) -> None: ...
             async def send(self, data: bytes) -> None: ...
             async def receive(self) -> bytes: ...
 
-        session = FIXSession(config, transport=MyTransport())
+            session = FIXSession(config, transport=MyTransport())
     """
+
+    async def connect(self) -> None:
+        """Open the transport connection to the remote endpoint.
+
+        Raises:
+            ConnectionError: If the connection cannot be established.
+            TimeoutError: If the connection attempt times out.
+        """
+        ...
 
     async def send(self, data: bytes) -> None:
         """Send raw bytes to the remote endpoint.

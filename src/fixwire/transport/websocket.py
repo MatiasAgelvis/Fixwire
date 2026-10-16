@@ -280,6 +280,16 @@ class WebSocketTransportAdapter:
         self._ws = ws
         self._connected = True
 
+    async def connect(self) -> None:
+        """No-op: the adapter wraps an already-accepted server connection.
+
+        The WebSocketServer hands us an open ``ServerConnection`` on each
+        accepted client, so there's nothing to dial. The method exists to
+        satisfy the ``Transport`` protocol and to give the engine a single
+        uniform entry point.
+        """
+        self._connected = True
+
     @property
     def is_connected(self) -> bool:
         """Check if transport is connected."""
