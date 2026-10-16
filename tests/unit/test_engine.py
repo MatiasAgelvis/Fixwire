@@ -232,11 +232,12 @@ class TestFIXEngineConnect:
         assert session._state.logon_time is not None
 
     @pytest.mark.asyncio
-    async def test_connect_honours_session_logon_timeout(
+    async def test_connect_logon_timeout_raises_and_tears_down(
         self, engine, session, transport
     ):
         """If peer never replies Logon, connect() raises TimeoutError within
-        session.config.logon_timeout and tears down cleanly."""
+        session.config.logon_timeout AND tears down cleanly: session moves
+        out of WAITING_LOGON, transport is closed, both tasks are stopped."""
         # Arrange: nothing fed → the logon handshake will time out
         session.config.logon_timeout = 0.1
 
@@ -246,6 +247,7 @@ class TestFIXEngineConnect:
             await asyncio.wait_for(engine.connect(), timeout=2.0)
 
         # Post-conditions: clean teardown
+        assert session.status != SessionStatus.LOGGED_ON
         assert not transport.is_connected
         assert engine._writer_task is None
         assert engine._reader_task is None
@@ -296,25 +298,6 @@ class TestFIXEngineConnect:
         assert engine._reader_task is None
         assert transport.sent == []
         assert session.status == SessionStatus.DISCONNECTED
-
-    @pytest.mark.asyncio
-    async def test_connect_tears_down_on_logon_timeout(
-        self, engine, session, transport
-    ):
-        """Logon timeout: connect() raises TimeoutError, session moves out
-        of WAITING_LOGON, transport is closed, both tasks are stopped."""
-        # Arrange
-        session.config.logon_timeout = 0.1
-
-        # Act: bound the test as a hang-safety guardrail
-        with pytest.raises(TimeoutError):
-            await asyncio.wait_for(engine.connect(), timeout=2.0)
-
-        # Assert: clean teardown
-        assert session.status != SessionStatus.LOGGED_ON
-        assert not transport.is_connected
-        assert engine._writer_task is None
-        assert engine._reader_task is None
 
     @pytest.mark.asyncio
     async def test_connect_recovers_from_malformed_logon_response(
