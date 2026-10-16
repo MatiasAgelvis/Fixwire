@@ -629,6 +629,24 @@ async def _drain_reader(engine: FIXEngine, turns: int = 4) -> None:
         await asyncio.sleep(0)
 
 
+async def _wait_for_sent(
+    transport: InMemoryTransport, data: bytes, timeout: float = 2.0
+) -> None:
+    """Wait until ``data`` appears in transport.sent or raise TimeoutError.
+
+    Use this instead of ``_drain_writer`` when the test needs to assert on
+    a specific message reaching the wire: polling the actual state is more
+    reliable than counting yields.
+    """
+    deadline = asyncio.get_event_loop().time() + timeout
+    while data not in transport.sent:
+        if asyncio.get_event_loop().time() > deadline:
+            raise TimeoutError(
+                f"data not in transport.sent within {timeout}s"
+            )
+        await asyncio.sleep(0.01)
+
+
 async def _wait_for_status(
     session: FIXSession, target: SessionStatus, timeout: float
 ) -> None:
