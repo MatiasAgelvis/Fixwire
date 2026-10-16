@@ -41,6 +41,7 @@ class FIXEngine:
         self._transport = transport
         self._closed = False
         self._writer_task: asyncio.Task[None] | None = None
+        self._reader_task: asyncio.Task[None] | None = None
         self._stop_event = asyncio.Event()
 
     # --- Lifecycle ---
@@ -127,6 +128,9 @@ class FIXEngine:
         self._stop_event.clear()
         self._writer_task = asyncio.create_task(
             self._writer_loop(), name="fixwire-engine-writer"
+        )
+        self._reader_task = asyncio.create_task(
+            self._reader_loop(), name="fixwire-engine-reader"
         )
 
     async def stop(self) -> None:
