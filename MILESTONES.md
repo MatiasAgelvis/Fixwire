@@ -53,7 +53,7 @@ Every milestone declares which level it aims at. Level must be **proven via the 
 | # | Milestone | Test bar | Status | Notes |
 |---|---|---|---|---|
 | M0 | Foundations (core protocol + transport) | A | ✅ Done | message, parser, factory, session — protocol logic |
-| M1 | Engine architecture (extract `FIXEngine`, wire transport) | A | [ ] Todo | Refactor + new middle layer + push inbound + lifecycle |
+| M1 | Engine architecture (extract `FIXEngine`, wire transport) | A | ✅ Done | `FIXEngine` + reader/writer tasks + lifecycle; design doc in `docs/design/session-transport.md` |
 | M2 | Protocol hardening (seq verify, heartbeat, reject, gap-fill) | B | [ ] Todo | Incoming seq verify is the critical missing piece |
 | M3 | Resilience (reconnect, persistence, audit logging) | B | [ ] Todo | Pluggable `SequenceStore` interface; file-backed default |
 | M4 | Security (WSS, TLS, no-secret-in-logs) | B | [ ] Todo | `wss://` first-class; cert validation configurable |
@@ -104,12 +104,12 @@ Every milestone declares which level it aims at. Level must be **proven via the 
 - TLS client cert auth (M4)
 
 **Deliverables:**
-- `FIXEngine` class with documented public API
-- `FIXSession` slimmed down (no `_heartbeat_task`, no transport reference, no I/O)
-- Refactor test suite that proves the protocol layer works without I/O
-- **One integration test:** two sessions over a real WebSocket exchange Logon → Heartbeat → Logout
-- Design doc: `docs/design/session-transport.md` documenting architecture and decisions
-- Branch: `feature/session-transport-integration`
+- ✅ `FIXEngine` class with documented public API
+- ✅ `FIXSession` slimmed down (no `_heartbeat_task`, no transport reference, no I/O)
+- ✅ Refactor test suite that proves the protocol layer works without I/O
+- ✅ **One integration test:** two sessions over a real WebSocket exchange Logon → Heartbeat → Logout (`tests/integration/test_engine_e2e.py`)
+- ✅ Design doc: `docs/design/session-transport.md` documenting architecture and decisions
+- ✅ Branch: merged to `develop` as `feature/engine-architecture`
 
 **Test bar reached:** A (exhaustive unit for protocol layer; one happy-path integration).
 
