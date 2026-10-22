@@ -46,7 +46,7 @@ graph TD
         E1["Lifecycle orchestrator"]
         E2["Writer task (outbound drain)"]
         E3["Reader task (inbound drain)"]
-        E4["Task guards (_safe_*)"]
+        E4["Task guards (_handle_task_error)"]
         E5["Status & error mapping"]
     end
 
@@ -82,19 +82,31 @@ The protocol layer never imports `asyncio` for I/O scheduling; it uses `asyncio.
 
 ---
 
-## 3. The Four Locked Decisions
+## 3. The Seven Locked Decisions
 
 These are the decisions we committed to after working through the alternatives. Each is preserved here so future contributors do not relitigate them.
 
-### Decision 1 — Transport ownership: caller injects into FIXEngine
+### Decision 1 — Transport ownership: the engine owns the connection lifecycle
 
-**Choice:** `FIXEngine(session, transport)` receives a ready-to-use `Transport`. Caller does `await transport.connect()` first.
+**Choice:** `FIXEngine(session, transport)` receives an *unconnected* `Transport`. `engine.connect()` calls `await transport.connect()` as its first step, so the engine owns the full open → logon → running lifecycle.
+
+> **Revised after implementation.** This ADR originally recorded "the caller connects the transport first." That was changed during M1 because it does not survive contact with the server side.
 
 | Considered | Choice | Reason |
 |---|---|---|
 | A. Engine builds from URL | ❌ | Couples `FIXEngine` to URL semantics; harder to inject a fake for tests |
-| **B. Caller injects** | ✅ | Pure injection; any `Transport` works; tests trivial |
-| C. Both | ❌ for now | Two code paths to maintain; can revisit if a real convenience emerges |
+| B. Caller connects, engine adopts | ❌ | See below — forces the caller to know which side it's on |
+| **C. Engine owns `connect()`** | ✅ | Uniform lifecycle; server-side adapters have nothing to dial |
+| D. Both paths | ❌ for now | Two code paths to maintain; can revisit if a real convenience emerges |
+
+**Why the original choice (B) was wrong.** `WebSocketTransport` (client) must be dialed before use. `WebSocketTransportAdapter` (server) is handed an *already-accepted* `ServerConnection` — there is nothing to dial. Under "caller connects," every server handler would have to call a no-op `connect()` before constructing the engine, and the engine could not tell which kind it was holding. Putting `connect()` on the `Transport` protocol makes both cases a single uniform call; the server-side implementation is a documented no-op.
+
+The `Transport` protocol therefore gained a `connect()` method, implemented as:
+- `WebSocketTransport.connect()` — dials the URL (already existed).
+- `InMemoryTransport.connect()` — no-op; asserts the always-connected invariant.
+- `WebSocketTransportAdapter.connect()` — no-op; the connection is open by construction.
+
+**Consequence:** `FIXSession` still never touches a transport. The engine is the only layer that knows one exists.
 
 ### Decision 2 — Outbound model: writer task drains the queue
 
@@ -104,7 +116,9 @@ These are the decisions we committed to after working through the alternatives. 
 
 ### Decision 3 — Inbound model: push with task guards
 
-**Choice:** `FIXEngine` runs a reader task that loops `await transport.receive()` → `session.receive(bytes)`. The reader is wrapped in a `_safe_*` pattern that catches `Exception` (re-raises `CancelledError`), logs, and sets `session.status = ERROR`.
+**Choice:** `FIXEngine` runs a reader task that loops `await transport.receive()` → `session.receive(bytes)`. The reader wraps the loop body in a task guard (`_handle_task_error`) that catches `Exception` (re-raises `CancelledError`), logs, and sets `session.status = ERROR`. Outbound, `_safe_send()` normalises any transport failure into `ConnectionError`.
+
+> **Revised after implementation.** This originally described a `_safe_*` pattern on both loops. Only the send side kept that name; the receive side uses the shared `_handle_task_error()` guard, because both failures need the same outcome (log → `ERROR` → signal shutdown) and one guard is easier to reason about than two near-identical wrappers. See Decision 6 for why that guard must not await the failing task.
 
 **Why not pull-only:** `receive()` would only fire when the caller asks, breaking the real-time semantics of FIX and forcing every consumer to implement their own polling loop.
 
@@ -114,10 +128,42 @@ These are the decisions we committed to after working through the alternatives. 
 
 **Choice:**
 
-- Any uncaught exception in a reader/writer task → log → `session.status = ERROR` → cancel sibling task → close transport.
+- Any uncaught exception in a reader/writer task → log → `session.status = ERROR` → signal sibling tasks via `_stop_event` → close transport.
 - Foreground awaits (`session.send`, `engine.disconnect`) re-raise the relevant `ConnectionError` so the caller can react.
 - Strict mode is on by default (M2 will codify this; today it is the parser's default).
 - Retries with exponential backoff are deferred to M3. The signature is reserved: `engine.reconnect()` exists as a stub but does nothing until M3.
+
+### Decision 5 — The engine owns time; the session owns state
+
+**Choice:** `FIXSession` transitions state and never waits. Both handshake deadlines live in `FIXEngine`.
+
+| Concern | Owner | Where |
+|---|---|---|
+| Transition to `WAITING_LOGON` / `WAITING_LOGOUT` | Session | `session.connect()` / `session.disconnect()` |
+| Wait for the peer's reply | Engine | `_wait_for_logon()` / `_await_logout()` |
+| Apply `logon_timeout` / `logout_timeout` | Engine | `engine.connect()` / `engine.disconnect()` |
+
+**Why:** `MILESTONES.md` defines M1's bar as a *pure protocol state machine* — "no asyncio tasks, no transport references, no I/O concerns." A session that blocks on a reply owns a deadline, and a deadline is coordination, not protocol. Keeping waits in the engine leaves the session's entire asyncio surface down to two passive uses: the outbound `asyncio.Queue`, and an `asyncio.iscoroutine()` duck-type check on app callbacks.
+
+The same rule pays forward: M2's heartbeat/TestRequest timing has the identical shape (the session decides *what* is late, the engine decides *when* to act), so one rule covers it.
+
+**Trade-off, accepted:** a `FIXSession` used standalone can no longer complete a handshake on its own — `disconnect()` parks in `WAITING_LOGOUT` and returns. Callers driving the session directly own the wait. This is deliberate: it is what makes level-A unit testing of the protocol layer possible without an event loop or a transport.
+
+### Decision 6 — Task guards must not await the failing task
+
+**Choice:** `_handle_task_error()` sets `ERROR`, signals `_stop_event`, and closes the transport — but never `await`s the task that failed. Awaiting task cleanup is the job of the outer caller (`connect()` / `stop()` / `disconnect()`).
+
+**Why:** the original M1 implementation had `_handle_task_error()` call `await self.stop()`, where `stop()` awaited both `_writer_task` and `_reader_task`. When invoked from inside the reader, that made the reader await *itself* — a self-deadlock. The reader would sit in `await self._reader_task` until its own 1 s timeout expired, then get cancelled, so every reader-driven failure surfaced as a hang or a spurious timeout instead of a clean `ERROR`. Symptom: `test_connect_recovers_from_malformed_logon_response` hung for the full 2 s guardrail rather than failing fast.
+
+**Rule:** a task may signal shutdown but may never wait for its own completion. This also forces the reader's receive to be bounded rather than blocking forever — see Decision 7.
+
+### Decision 7 — Both loops poll a bounded idle interval
+
+**Choice:** writer and reader both wrap their blocking call in `asyncio.wait_for(..., timeout=_IDLE_POLL)` (50 ms) and `continue` on `TimeoutError`. Neither loop waits on `_stop_event.wait()`, and neither blocks indefinitely.
+
+**Why:** `_stop_event` is a *signal*, not a wakeup the loops were subscribed to. Without the bounded poll, a reader parked in `transport.receive()` only observes shutdown when the transport closes underneath it. Polling keeps the loops symmetric, bounds shutdown latency to `_IDLE_POLL`, and makes the loops cancellable — which is what Decision 6 requires.
+
+**Cost:** up to 50 ms of shutdown latency, and a small idle wakeup cost (50 ms × 2 tasks per session). Acceptable for a session count in the hundreds; revisit if it ever matters.
 
 ---
 
@@ -238,12 +284,13 @@ sequenceDiagram
     participant R as Remote
 
     App->>Eng: await engine.connect()
-    Eng->>T: transport.is_connected?  (already opened by caller per Decision 1)
+    Eng->>T: await transport.connect()
+    Note over T: no-op for server-side adapters (Decision 1)
     Eng->>Eng: spawn _writer_task
     Eng->>Eng: spawn _reader_task (bounded queue in M3+)
     Eng->>S: await session.connect()
     S->>S: status = CONNECTING → WAITING_LOGON
-    Note over S: send() puts logon on _send_queue
+    Note over S: send() puts logon on _send_queue, returns immediately
     Eng->>Eng: writer dequeues logon, serializes
     Eng->>T: transport.send(bytes)
     T->>R: WS frame
@@ -268,14 +315,14 @@ sequenceDiagram
     S->>Q: put (msg stamped with seq/sending_time)
 
     par Writer
-        loop while not stopping
-            WT->>Q: get
+        loop while not stopping, polling every _IDLE_POLL
+            WT->>Q: get (bounded by _IDLE_POLL)
             WT->>WT: msg.serialize()
             WT->>T: transport.send(bytes)
         end
     and Reader
-        loop while not stopping
-            T-->>RT: await receive()
+        loop while not stopping, polling every _IDLE_POLL
+            T-->>RT: receive() (bounded by _IDLE_POLL)
             RT->>S: await session.receive(bytes)
             S->>S: parse + dispatch handlers + fire callbacks
         end
@@ -294,8 +341,9 @@ sequenceDiagram
 
     App->>Eng: await engine.disconnect()
     Eng->>S: await session.disconnect()
-    S->>S: status = WAITING_LOGOUT, send logout
-    Note over Eng: writer drains, transport.send(logout)
+    S->>S: status = WAITING_LOGOUT, send logout, return
+    Note over S: no wait — the engine owns the timeout (Decision 5)
+    Eng->>Eng: await _await_logout() bounded by logout_timeout
     S-->>Eng: status = DISCONNECTED (on response)
     Eng->>Eng: cancel _reader_task, _writer_task
     Eng->>T: await transport.close() (idempotent)
@@ -348,14 +396,14 @@ State transitions remain in `FIXSession`; `FIXEngine` only reads `session.status
 | Source | Where it surfaces | Strict mode action | Non-strict action | Session status |
 |---|---|---|---|---|
 | Transport connect refused | `engine.connect()` raises `ConnectionError` | n/a | n/a | stays `DISCONNECTED` |
-| Transport dropped mid-session | Reader task catches | Log, set `ERROR`, cancel siblings, close transport | Same | `ERROR` |
+| Transport dropped mid-session | Reader task catches | Log, set `ERROR`, signal siblings via `_stop_event`, close transport | Same | `ERROR` |
 | `FIXParseError` (bad checksum, malformed) | Inside `session.receive` | Raise → reader task catches → `ERROR` | Log + drop message | unchanged (non-strict) or `ERROR` (strict) |
 | Sequence mismatch (M2) | Inside `session.receive` | Logout | Reject + continue (M2 fix) | unchanged or `ERROR` |
 | Heartbeat timeout | `FIXEngine` heartbeat task | Logout (M2) | Same | `ERROR` |
 | TestRequest timeout | `FIXEngine` heartbeat task | Disconnect (M2) | Same | `ERROR` |
-| Logon timeout | `engine.connect()` awaits wait | Raise `TimeoutError` | Same | `ERROR` |
-| Logout timeout | `engine.disconnect()` | Force close | Same | `DISCONNECTED` |
-| Unhandled exception in task | Reader/Writer task `_safe_*` wrapper | Log, set `ERROR` | Same | `ERROR` |
+| Logon timeout | `engine.connect()` awaits `_wait_for_logon()` | Raise `TimeoutError` | Same | `ERROR` |
+| Logout timeout | `engine.disconnect()` awaits `_await_logout()` | Force `DISCONNECTED` | Same | `DISCONNECTED` |
+| Unhandled exception in task | Reader/Writer `_handle_task_error()` guard | Log, set `ERROR`, signal shutdown | Same | `ERROR` |
 | Caller-initiated `engine.disconnect()` while running | Engine | Cancel tasks, close transport | Same | `DISCONNECTED` |
 
 The error matrix is enforced by tests: every row above maps to one or more named tests in M1 and M2.
@@ -369,11 +417,11 @@ The error matrix is enforced by tests: every row above maps to one or more named
 | # | Slice | Tests added |
 |---|---|---|
 | 1 | Refactor `FIXSession` to be transport-agnostic. No behavior change. | Existing `test_session.py` keeps passing. New negative tests: `FIXSession` constructor doesn't import or accept a `Transport`. |
-| 2 | Add `FIXEngine` skeleton: constructor, `disconnect()` (no I/O yet), `status` / `is_connected` delegation. | Unit tests for `FIXEngine` with hand-rolled `FakeTransport`. |
-| 3 | Writer task: drain `_send_queue`, serialize, `transport.send`. | Tests using `FakeTransport` with a recording `sent` list; deterministic. |
-| 4 | Reader task: `transport.receive()` → `session.receive(bytes)`; `_safe_*` error guard. | Test injecting a `FIXMessage`-producing fake transport. Test where the fake transport raises to verify `ERROR` is set. |
-| 5 | Lifecycle: `engine.connect()` orchestrates everything. `engine.disconnect()` cancels + closes. | Unit tests with fake transport. **`assertLogged` for state transitions.** |
-| 6 | Real WebSocket integration test (one happy path): two sessions over `WebSocketServer` complete a Logon → Heartbeat → Logout. | New file `tests/integration/test_session_over_websocket.py`. Requires a free port — sandbox cannot bind; user's machine can. |
+| 2 | Add `FIXEngine` skeleton: constructor, `disconnect()` (no I/O yet), `status` / `is_connected` delegation. | Unit tests for `FIXEngine` over `InMemoryTransport`. |
+| 3 | Writer task: drain `_send_queue`, serialize, `transport.send`. | Tests over `InMemoryTransport`; deterministic, socket-free. |
+| 4 | Reader task: `transport.receive()` → `session.receive(bytes)`; `_handle_task_error` guard. | `InMemoryTransport.feed()` injects inbound bytes. Test where `receive()` raises to verify `ERROR` is set. |
+| 5 | Lifecycle: `engine.connect()` orchestrates everything. `engine.disconnect()` cancels + closes. | Unit tests over `InMemoryTransport`. **`assertLogged` for state transitions.** |
+| 6 | Real WebSocket integration test (one happy path): two sessions over `WebSocketServer` complete a Logon → Heartbeat → Logout. | New file `tests/integration/test_engine_e2e.py`. Requires a free port — sandbox cannot bind; user's machine can. |
 
 Each slice is its own commit on `feature/session-transport-integration`. CI must be green at each merge point.
 
