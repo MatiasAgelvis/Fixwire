@@ -138,6 +138,53 @@ class TestFIXEngineDisconnect:
         assert session.status == SessionStatus.DISCONNECTED
         assert transport.close_count == 1
 
+    @pytest.mark.asyncio
+    async def test_disconnect_parks_when_peer_replies_logout(
+        self, engine, session, transport
+    ):
+        """Test that disconnect() resolves on the peer's Logout reply.
+
+        The engine owns the logout wait, so this is its responsibility:
+        the session must reach DISCONNECTED because the reply arrived,
+        not because logout_timeout expired.
+        """
+        # Arrange: a generous timeout so a pass cannot come from the timeout
+        session.config.logout_timeout = 5.0
+        session.status = SessionStatus.LOGGED_ON
+        await engine.start()
+
+        # Act: drive disconnect in the background so we can reply mid-wait
+        disconnect_task = asyncio.create_task(engine.disconnect())
+        await _wait_for_status(session, SessionStatus.WAITING_LOGOUT, timeout=1.0)
+
+        peer_logout = FIXMessageFactory.create_logout(
+            sender="SERVER", target="CLIENT", seq=1
+        )
+        transport.feed(peer_logout.serialize())
+        await asyncio.wait_for(disconnect_task, timeout=2.0)
+
+        # Assert: parked via the reply, not the timeout.
+        # close_count is >= 1: stop() closes the transport to unblock the
+        # reader, then disconnect() closes it again. Both are idempotent.
+        assert session.status == SessionStatus.DISCONNECTED
+        assert transport.close_count >= 1
+
+    @pytest.mark.asyncio
+    async def test_disconnect_forces_disconnected_on_logout_timeout(
+        self, engine, session, transport
+    ):
+        """Test that a silent peer is forced to DISCONNECTED after the timeout."""
+        # Arrange: peer never replies; timeout is tiny
+        session.config.logout_timeout = 0.05
+        session.status = SessionStatus.LOGGED_ON
+
+        # Act
+        await asyncio.wait_for(engine.disconnect(), timeout=2.0)
+
+        # Assert: engine applied the timeout policy itself
+        assert session.status == SessionStatus.DISCONNECTED
+        assert transport.close_count == 1
+
 
 class TestFIXEngineReconnect:
     """Test that reconnect() is not yet implemented."""

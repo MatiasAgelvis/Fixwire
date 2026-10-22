@@ -106,18 +106,46 @@ class FIXEngine:
         await self.stop()
 
     async def disconnect(self) -> None:
-        """Run session logout, stop tasks, close transport. Idempotent."""
+        """Run session logout, wait for the response, stop tasks, close
+        transport. Idempotent.
+
+        The engine owns both handshake waits. ``session.disconnect()`` only
+        queues the Logout and parks the session in WAITING_LOGOUT; this
+        method applies ``session.config.logout_timeout`` and forces the
+        session to DISCONNECTED if the peer never replies.
+        """
         if self._closed:
             return
         self._closed = True
 
         await self._session.disconnect()
+        await self._await_logout()
         await self.stop()
         await self._transport.close()
 
         logger.info("engine.disconnected",
                     sender=self._session.config.sender_comp_id,
                     target=self._session.config.target_comp_id)
+
+    async def _await_logout(self) -> None:
+        """Wait for the session to leave WAITING_LOGOUT, bounded by
+        ``config.logout_timeout``. Forces DISCONNECTED on timeout.
+        """
+        try:
+            await asyncio.wait_for(
+                self._wait_for_status(SessionStatus.DISCONNECTED),
+                timeout=self._session.config.logout_timeout,
+            )
+        except TimeoutError:
+            logger.warning("engine.logout_timeout",
+                           sender=self._session.config.sender_comp_id,
+                           target=self._session.config.target_comp_id)
+            self._session.status = SessionStatus.DISCONNECTED
+
+    async def _wait_for_status(self, target: SessionStatus) -> None:
+        """Poll until ``session.status`` reaches ``target``."""
+        while self._session.status != target:
+            await asyncio.sleep(0.01)
 
     # --- Internal task control ---
 

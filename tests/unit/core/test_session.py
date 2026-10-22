@@ -166,6 +166,58 @@ class TestFIXSessionSequenceNumbers:
         assert session.get_next_expected_seq_num() == 6
 
 
+class TestFIXSessionDisconnect:
+    """disconnect() is a pure state transition — it must not wait.
+
+    Owning time is the caller's job (see FIXEngine.disconnect). These tests
+    pin that contract so the wait cannot silently creep back in.
+    """
+
+    @pytest.mark.asyncio
+    async def test_disconnect_queues_logout_and_parks_waiting(self, session):
+        """disconnect() queues a Logout and parks in WAITING_LOGOUT.
+
+        Does not block on the peer's response — a caller driving the session
+        directly owns the timeout.
+        """
+        # Arrange
+        session.status = SessionStatus.LOGGED_ON
+
+        # Act
+        await session.disconnect()
+
+        # Assert: Logout queued, session still waiting (not forced to end)
+        logout = session._send_queue.get_nowait()
+        assert logout[35] == MsgType.LOGOUT
+        assert session.status == SessionStatus.WAITING_LOGOUT
+
+    @pytest.mark.asyncio
+    async def test_disconnect_from_not_logged_on_parks_disconnected(self, session):
+        """disconnect() from a non-LOGGED_ON state parks at DISCONNECTED.
+
+        No Logout is queued — there was no session to log out of.
+        """
+        # Act
+        await session.disconnect()
+
+        # Assert
+        assert session.status == SessionStatus.DISCONNECTED
+        assert session._send_queue.empty()
+
+    @pytest.mark.asyncio
+    async def test_disconnect_creates_no_background_tasks(self, session):
+        """disconnect() spawns no tasks — the session owns no concurrency."""
+        # Arrange
+        session.status = SessionStatus.LOGGED_ON
+        tasks_before = asyncio.all_tasks()
+
+        # Act
+        await session.disconnect()
+
+        # Assert
+        assert asyncio.all_tasks() == tasks_before
+
+
 class TestFIXSessionStatus:
     """Test session status management."""
 
