@@ -318,7 +318,18 @@ class FIXSession:
         self.status = SessionStatus.WAITING_LOGON
 
     async def disconnect(self) -> None:
-        """Initiate session logout and disconnect."""
+        """Initiate session logout and park the session in WAITING_LOGOUT.
+
+        Pure state transition — this queues the Logout and returns. It
+        does not wait for the peer's Logout response and applies no
+        timeout: owning time is the caller's job. `FIXEngine.disconnect()`
+        drives the wait using `config.logout_timeout` and forces the
+        session to DISCONNECTED if the peer never replies.
+
+        Note the asymmetry with `connect()`, which likewise returns as soon
+        as the Logon is queued. Both waits live in the engine so the session
+        stays a pure state machine with no asyncio coordination.
+        """
         if self.status != SessionStatus.LOGGED_ON:
             self.status = SessionStatus.DISCONNECTED
             return
@@ -332,21 +343,6 @@ class FIXSession:
             seq=0  # Will be set by send()
         )
         await self.send(logout)
-
-        # Wait for logout response or timeout
-        try:
-            await asyncio.wait_for(
-                self._wait_for_status(SessionStatus.DISCONNECTED),
-                timeout=self.config.logout_timeout
-            )
-        except TimeoutError:
-            logger.warning("session.logout_timeout")
-            self.status = SessionStatus.DISCONNECTED
-
-    async def _wait_for_status(self, target_status: SessionStatus) -> None:
-        """Wait until session reaches target status."""
-        while self.status != target_status:
-            await asyncio.sleep(0.1)
 
     async def check_heartbeat(self) -> None:
         """Run one heartbeat check: probe silent peers, escalate on timeout.
