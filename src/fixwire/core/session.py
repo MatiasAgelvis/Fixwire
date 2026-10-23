@@ -297,10 +297,13 @@ class FIXSession:
                        new_seq=new_seq)
 
     async def connect(self) -> None:
-        """Initiate session connection and logon."""
+        """Initiate session connection and logon.
+
+        Sequence numbers are preserved across a reconnect unless
+        ``config.reset_seq_num`` is set. FIX requires continuity: wiping
+        the counters would make the peer see a false gap.
+        """
         self.status = SessionStatus.CONNECTING
-        self._state.outgoing_seq_num = 0
-        self._state.incoming_seq_num = 0
 
         if self.config.reset_seq_num:
             self._state.outgoing_seq_num = 0
