@@ -165,6 +165,44 @@ class TestFIXSessionSequenceNumbers:
         # Assert
         assert session.get_next_expected_seq_num() == 6
 
+    @pytest.mark.asyncio
+    async def test_connect_preserves_sequence_numbers_by_default(self, session):
+        """connect() must not reset sequence numbers unless configured to.
+
+        FIX requires sequence continuity across a reconnect. Wiping the
+        counters unconditionally makes the peer see a false gap.
+        """
+        # Arrange: a session mid-life, as after a reconnect
+        session._state.outgoing_seq_num = 100
+        session._state.incoming_seq_num = 50
+        assert session.config.reset_seq_num is False  # the default
+
+        # Act
+        await session.connect()
+
+        # Assert: the Logon continues the sequence, counters were not wiped
+        logon = session._send_queue.get_nowait()
+        assert logon.sequence == 101
+        assert session.get_next_send_seq_num() == 102
+        assert session.get_next_expected_seq_num() == 51
+
+    @pytest.mark.asyncio
+    async def test_connect_resets_sequence_numbers_when_configured(self, session):
+        """connect() resets both counters when reset_seq_num is True."""
+        # Arrange
+        session.config.reset_seq_num = True
+        session._state.outgoing_seq_num = 100
+        session._state.incoming_seq_num = 50
+
+        # Act
+        await session.connect()
+
+        # Assert: the Logon opens the session at seq 1
+        logon = session._send_queue.get_nowait()
+        assert logon.sequence == 1
+        assert session.get_next_send_seq_num() == 2
+        assert session.get_next_expected_seq_num() == 1
+
 
 class TestFIXSessionDisconnect:
     """disconnect() is a pure state transition — it must not wait.
