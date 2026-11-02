@@ -624,7 +624,7 @@ class TestFIXMessagePropertiesExtended:
         """Test begin_sequence_number property."""
         # Arrange
         msg = FIXMessage()
-        msg[132] = "1"
+        msg[7] = "1"
 
         # Act & Assert
         assert msg.begin_sequence_number == 1
@@ -633,7 +633,7 @@ class TestFIXMessagePropertiesExtended:
         """Test end_sequence_number property."""
         # Arrange
         msg = FIXMessage()
-        msg[133] = "100"
+        msg[16] = "100"
 
         # Act & Assert
         assert msg.end_sequence_number == 100

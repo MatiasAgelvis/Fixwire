@@ -172,8 +172,8 @@ class FIXMessageFactory:
         msg.sender = sender
         msg.target = target
         msg.sequence = seq
-        msg.set(132, str(begin_seq_no))
-        msg.set(133, str(end_seq_no))
+        msg.set(7, str(begin_seq_no))
+        msg.set(16, str(end_seq_no))
         return msg
 
     @staticmethod

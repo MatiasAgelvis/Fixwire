@@ -182,8 +182,8 @@ class TestFIXMessageFactorySessionMessages:
 
         # Assert
         assert msg[35] == "2"
-        assert msg[132] == str(begin_seq_no)
-        assert msg[133] == str(end_seq_no)
+        assert msg[7] == str(begin_seq_no)
+        assert msg[16] == str(end_seq_no)
 
     def test_create_resend_request_no_end(self):
         """Test ResendRequest without end sequence."""
@@ -198,8 +198,8 @@ class TestFIXMessageFactorySessionMessages:
 
         # Assert
         assert msg[35] == "2"
-        assert msg[132] == str(begin_seq_no)
-        assert msg[133] == "0"
+        assert msg[7] == str(begin_seq_no)
+        assert msg[16] == "0"
 
     def test_create_sequence_reset(self):
         """Test SequenceReset creation."""
@@ -376,8 +376,8 @@ class TestFIXMessageFactoryEdgeCases:
         msg = FIXMessageFactory.create_resend_request("CLIENT", "SERVER", 1, 100, 50)
 
         # Assert
-        assert msg[132] == "100"
-        assert msg[133] == "50"
+        assert msg[7] == "100"
+        assert msg[16] == "50"
 
     def test_resend_zero_begin(self):
         """Test ResendRequest with zero begin_seq_no."""
@@ -385,8 +385,8 @@ class TestFIXMessageFactoryEdgeCases:
         msg = FIXMessageFactory.create_resend_request("CLIENT", "SERVER", 1, 0)
 
         # Assert
-        assert msg[132] == "0"
-        assert msg[133] == "0"
+        assert msg[7] == "0"
+        assert msg[16] == "0"
 
     def test_sequence_reset_zero_new_seq(self):
         """Test SequenceReset with zero new_seq_no."""

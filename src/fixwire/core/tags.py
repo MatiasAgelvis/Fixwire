@@ -184,6 +184,8 @@ TAG_NAMES: dict[int, str] = {
     130: "DeliverToLocationID",
 
     # Session Management
+    7: "BeginSeqNo",
+    16: "EndSeqNo",
     36: "NewSeqNo",
     45: "RefSeqNum",
     78: "NoAllocs",
@@ -193,8 +195,6 @@ TAG_NAMES: dict[int, str] = {
     108: "HeartBtInt",
     112: "TestReqID",
     123: "GapFillFlag",
-    132: "BeginSeqNo",
-    133: "EndSeqNo",
     140: "RawDataLength",
     141: "ResetSeqNumFlag",
     189: "MaxMessageSize",
@@ -306,7 +306,7 @@ HEADER_TAGS: list[int] = [35, 49, 56, 34, 52]  # MsgType, Sender, Target, SeqNum
 REQUIRED_TAGS: dict[str, list[int]] = {
     "0": HEADER_TAGS,  # Heartbeat
     "1": HEADER_TAGS + [112],  # TestRequest
-    "2": HEADER_TAGS + [132, 133],  # ResendRequest
+    "2": HEADER_TAGS + [7, 16],  # ResendRequest
     "3": HEADER_TAGS + [45, 371, 372],  # Reject
     "4": HEADER_TAGS + [36, 123],  # SequenceReset
     "5": HEADER_TAGS,  # Logout
