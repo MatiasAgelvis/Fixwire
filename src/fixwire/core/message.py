@@ -396,13 +396,13 @@ class FIXMessage:
 
     @property
     def begin_sequence_number(self) -> int:
-        """First sequence number in range request (Tag 132)."""
-        return self.get_int(132)
+        """First sequence number in range request (Tag 7)."""
+        return self.get_int(7)
 
     @property
     def end_sequence_number(self) -> int:
-        """Last sequence number in range request (Tag 133)."""
-        return self.get_int(133)
+        """Last sequence number in range request (Tag 16)."""
+        return self.get_int(16)
 
     @property
     def new_sequence_number(self) -> int:
