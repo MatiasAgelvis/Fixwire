@@ -447,8 +447,16 @@ class FIXSession:
             return
 
         if self._state.test_request_id:
-            # Previous test request not answered
+            # Previous test request not answered: terminate, but tell the
+            # peer why before parking the session.
             logger.warning("session.heartbeat_timeout")
+            logout = FIXMessageFactory.create_logout(
+                sender=self.config.sender_comp_id,
+                target=self.config.target_comp_id,
+                seq=0,  # Will be set by send()
+                text="Heartbeat timeout: TestRequest unanswered",
+            )
+            await self.send(logout)
             self.status = SessionStatus.ERROR
             return
 

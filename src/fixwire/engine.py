@@ -175,11 +175,11 @@ class FIXEngine:
     async def stop(self) -> None:
         """Signal I/O tasks to stop and wait for them. Idempotent.
 
-        The writer is woken by setting ``_stop_event``; it finishes any
-        message it already pulled, then returns. The reader is unblocked
-        by closing the transport, which makes ``transport.receive()``
-        raise — the reader's task guard sees ``_stop_event`` is set and
-        exits cleanly without setting ERROR.
+        The writer is woken by setting ``_stop_event`` but drains anything
+        already queued before exiting, so a Logout queued just before
+        teardown still reaches the peer. The reader is unblocked by its own
+        bounded poll (``_IDLE_POLL``), so the transport stays open until
+        the drain finishes.
         """
         if (
             self._writer_task is None
@@ -188,21 +188,45 @@ class FIXEngine:
         ):
             return
         self._stop_event.set()
-        # Close the transport so a reader blocked in receive() wakes up.
+        # Reader and heartbeat exit on their own polls; the writer drains
+        # the queue. Only then do we cut the wire.
+        await self._await_task(self._reader_task, timeout=1.0)
+        await self._await_task(self._heartbeat_task, timeout=1.0)
+        await self._await_task(self._writer_task, timeout=1.0)
         try:
             await self._transport.close()
         except Exception:
             pass
-        for task in (self._writer_task, self._reader_task, self._heartbeat_task):
-            if task is None or task.done():
-                continue
-            try:
-                await asyncio.wait_for(task, timeout=1.0)
-            except (TimeoutError, asyncio.CancelledError):
-                task.cancel()
         self._writer_task = None
         self._reader_task = None
         self._heartbeat_task = None
+
+    async def _await_task(
+        self, task: asyncio.Task[None] | None, timeout: float
+    ) -> None:
+        """Await a task with a bound; cancel it if it overruns."""
+        if task is None or task.done():
+            return
+        try:
+            await asyncio.wait_for(task, timeout=timeout)
+        except (TimeoutError, asyncio.CancelledError):
+            task.cancel()
+
+    async def _teardown_on_error(self) -> None:
+        """Drain queued outbound, then close the transport.
+
+        Called from the heartbeat task, so it must never await itself — it
+        awaits the writer (a different task) to flush, then closes.
+        """
+        logger.warning("engine.session_error",
+                       sender=self._session.config.sender_comp_id,
+                       target=self._session.config.target_comp_id)
+        self._stop_event.set()
+        await self._await_task(self._writer_task, timeout=1.0)
+        try:
+            await self._transport.close()
+        except Exception:
+            pass
 
     # --- Writer task ---
 
@@ -213,7 +237,11 @@ class FIXEngine:
         ERROR, and closes the transport.
         """
         queue = self._session._send_queue
-        while not self._stop_event.is_set():
+        while True:
+            # Exit only when shutdown is signalled *and* nothing is queued,
+            # so a Logout queued just before teardown still reaches the peer.
+            if self._stop_event.is_set() and queue.empty():
+                return
             try:
                 msg = await asyncio.wait_for(queue.get(), timeout=_IDLE_POLL)
             except TimeoutError:
@@ -247,17 +275,10 @@ class FIXEngine:
         transport is enough — the sibling loops exit on their next poll.
         """
         while not self._stop_event.is_set():
-            if self._session.status == SessionStatus.ERROR:
-                logger.warning("engine.session_error",
-                               sender=self._session.config.sender_comp_id,
-                               target=self._session.config.target_comp_id)
-                self._stop_event.set()
-                try:
-                    await self._transport.close()
-                except Exception:
-                    pass
-                return
             await self._session.check_heartbeat()
+            if self._session.status == SessionStatus.ERROR:
+                await self._teardown_on_error()
+                return
             # Sleep until the next tick, but wake immediately on shutdown so
             # stop() is not delayed by a full poll interval.
             try:
