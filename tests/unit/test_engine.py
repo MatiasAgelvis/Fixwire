@@ -704,7 +704,9 @@ class TestFIXEngineHeartbeat:
 
         # Act: something else (e.g. seq too low) moves the session to ERROR
         session.status = SessionStatus.ERROR
-        await _wait_until(lambda: engine._stop_event.is_set(), timeout=1.0)
+        # Teardown now drains the writer before closing, so wait for the
+        # close rather than for the stop flag.
+        await _wait_until(lambda: transport.is_connected is False, timeout=1.0)
 
         # Assert: transport closed and no task left running
         assert engine._stop_event.is_set()
@@ -736,6 +738,84 @@ class TestFIXEngineHeartbeat:
 
         # Assert
         assert session.status == SessionStatus.LOGGED_ON
+        assert engine._heartbeat_task is None
+
+
+class TestFIXEngineTeardown:
+    """Teardown must flush queued outbound before cutting the wire.
+
+    The writer used to exit the moment _stop_event was set, so a Logout
+    queued just before teardown could be dropped.
+    """
+
+    @pytest.mark.asyncio
+    async def test_seq_too_low_logout_reaches_the_wire(
+        self, engine, session, transport
+    ):
+        """A too-low sequence queues a Logout; the engine must send it."""
+        # Arrange
+        engine._heartbeat_poll = 0.01
+        session.status = SessionStatus.LOGGED_ON
+        session._state.incoming_seq_num = 5  # expecting 6
+        await engine.start()
+
+        # Act: feed a message with seq 3 (too low, no PossDupFlag)
+        low = FIXMessageFactory.create_heartbeat("SERVER", "CLIENT", seq=3)
+        transport.feed(low.serialize())
+        await _wait_until(
+            lambda: any(b"35=5" in d for d in transport.sent), timeout=2.0
+        )
+
+        # Assert: the Logout actually went out, and the session is parked
+        assert any(b"35=5" in d for d in transport.sent)
+        assert session.status == SessionStatus.ERROR
+
+    @pytest.mark.asyncio
+    async def test_stop_drains_queue_before_closing(
+        self, engine, session, transport
+    ):
+        """stop() sends what is already queued before closing the transport."""
+        # Arrange
+        msg = FIXMessageFactory.create_heartbeat("CLIENT", "SERVER", 0)
+        await session.send(msg)
+        msg_bytes = msg.serialize()
+
+        # Act: start then stop immediately — the drain must flush the queue
+        await engine.start()
+        await engine.stop()
+
+        # Assert
+        assert msg_bytes in transport.sent
+
+    @pytest.mark.asyncio
+    async def test_stop_is_bounded_when_transport_is_dead(
+        self, engine, session, transport
+    ):
+        """A failing send must not make stop() hang."""
+        # Arrange
+        transport.send = AsyncMock(side_effect=ConnectionError("dead"))
+        await session.send(
+            FIXMessageFactory.create_heartbeat("CLIENT", "SERVER", 0)
+        )
+        await engine.start()
+
+        # Act
+        await asyncio.wait_for(engine.stop(), timeout=2.0)
+
+        # Assert: teardown completed and bookkeeping cleared
+        assert engine._writer_task is None
+
+    @pytest.mark.asyncio
+    async def test_writer_exits_when_stopped_and_empty(self, engine):
+        """The writer drains then exits; no busy loop after stop."""
+        # Arrange
+        await engine.start()
+
+        # Act
+        await engine.stop()
+
+        # Assert
+        assert engine._writer_task is None
         assert engine._heartbeat_task is None
 
 
