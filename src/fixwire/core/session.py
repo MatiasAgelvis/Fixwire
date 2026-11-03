@@ -17,6 +17,7 @@ import structlog
 from fixwire.core.factory import FIXMessageFactory
 from fixwire.core.message import FIXMessage
 from fixwire.core.parser import FIXParser
+from fixwire.core.tags import MsgType, Tags
 from fixwire.core.time import utc_now
 
 logger = structlog.get_logger()
@@ -160,19 +161,19 @@ class FIXSession:
                     seq=msg.sequence)
 
         # Session level messages
-        if msg_type == "A":  # Logon
+        if msg_type == MsgType.LOGON:
             await self._handle_logon(msg)
-        elif msg_type == "5":  # Logout
+        elif msg_type == MsgType.LOGOUT:
             await self._handle_logout(msg)
-        elif msg_type == "0":  # Heartbeat
+        elif msg_type == MsgType.HEARTBEAT:
             await self._handle_heartbeat(msg)
-        elif msg_type == "1":  # TestRequest
+        elif msg_type == MsgType.TEST_REQUEST:
             await self._handle_test_request(msg)
-        elif msg_type == "2":  # ResendRequest
+        elif msg_type == MsgType.RESEND_REQUEST:
             await self._handle_resend_request(msg)
-        elif msg_type == "3":  # Reject
+        elif msg_type == MsgType.REJECT:
             await self._handle_reject(msg)
-        elif msg_type == "4":  # SequenceReset
+        elif msg_type == MsgType.SEQUENCE_RESET:
             await self._handle_sequence_reset(msg)
 
         # Notify callbacks
@@ -224,7 +225,7 @@ class FIXSession:
         else:
             # We received logout request, send response
             response = FIXMessage()
-            response.msg_type = "5"
+            response.msg_type = MsgType.LOGOUT
             await self.send(response)
             self.status = SessionStatus.DISCONNECTED
             logger.info("session.logout_received")
@@ -233,14 +234,14 @@ class FIXSession:
         """Handle Heartbeat message."""
         # Check if this is response to our TestRequest
         if (self._state.test_request_id and
-            msg.get(112) == self._state.test_request_id):
+            msg.get(Tags.TEST_REQ_ID) == self._state.test_request_id):
             self._state.test_request_id = None
             self._state.test_request_time = None
             logger.debug("session.heartbeat_test_response_received")
 
     async def _handle_test_request(self, msg: FIXMessage) -> None:
         """Handle TestRequest message."""
-        test_req_id = msg.get(112)
+        test_req_id = msg.get(Tags.TEST_REQ_ID)
         if test_req_id:
             # Respond with Heartbeat containing TestReqID
             heartbeat = FIXMessageFactory.create_heartbeat(
@@ -264,9 +265,9 @@ class FIXSession:
         # TODO: Implement actual message resend
         new_seq = end_seq + 1 if end_seq > 0 else self._state.outgoing_seq_num + 1
         seq_reset = FIXMessage()
-        seq_reset.msg_type = "4"
-        seq_reset.set(36, str(new_seq))
-        seq_reset.set(123, "Y")  # GapFillFlag
+        seq_reset.msg_type = MsgType.SEQUENCE_RESET
+        seq_reset.set(Tags.NEW_SEQ_NO, str(new_seq))
+        seq_reset.set(Tags.GAP_FILL_FLAG, "Y")
         await self.send(seq_reset)
 
     async def _handle_reject(self, msg: FIXMessage) -> None:
@@ -378,8 +379,8 @@ class FIXSession:
         self._state.test_request_time = now
 
         test_req = FIXMessage()
-        test_req.msg_type = "1"
-        test_req.set(112, test_req_id)
+        test_req.msg_type = MsgType.TEST_REQUEST
+        test_req.set(Tags.TEST_REQ_ID, test_req_id)
         await self.send(test_req)
 
     def get_next_expected_seq_num(self) -> int:

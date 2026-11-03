@@ -3,7 +3,7 @@
 Complete tag registry for FIX 4.4 protocol.
 """
 
-from enum import StrEnum
+from enum import IntEnum, StrEnum
 
 
 class MsgType(StrEnum):
@@ -52,6 +52,61 @@ class MsgType(StrEnum):
     ALLOCATION_INSTRUCTION = "J"
     ALLOCATION_REPORT = "P"
     ALLOCATION_REPORT_ACK = "AS"
+
+
+class Tags(IntEnum):
+    """FIX 4.4 field numbers used by this engine.
+
+    Centralising the numbers means a wrong tag can only exist in one place,
+    and makes the M6 spec cross-check tractable. Prefer these over bare
+    integers anywhere a tag number is written or read.
+    """
+
+    # Session / header
+    BEGIN_STRING = 8
+    BODY_LENGTH = 9
+    CHECKSUM = 10
+    MSG_SEQ_NUM = 34
+    MSG_TYPE = 35
+    POSS_DUP_FLAG = 43
+    SENDER_COMP_ID = 49
+    SENDING_TIME = 52
+    TARGET_COMP_ID = 56
+
+    # Session management
+    BEGIN_SEQ_NO = 7
+    END_SEQ_NO = 16
+    NEW_SEQ_NO = 36
+    REF_SEQ_NUM = 45
+    ENCRYPT_METHOD = 98
+    HEART_BT_INT = 108
+    TEST_REQ_ID = 112
+    GAP_FILL_FLAG = 123
+    RESET_SEQ_NUM_FLAG = 141
+    REF_TAG_ID = 371
+    REF_MSG_TYPE = 372
+    SESSION_REJECT_REASON = 373
+
+    # Order / execution
+    ACCOUNT = 1
+    AVG_PX = 6
+    CL_ORD_ID = 11
+    CUM_QTY = 14
+    EXEC_ID = 17
+    LAST_PX = 31
+    LAST_QTY = 32
+    ORDER_ID = 37
+    ORDER_QTY = 38
+    ORD_STATUS = 39
+    ORD_TYPE = 40
+    ORIG_CL_ORD_ID = 41
+    PRICE = 44
+    SIDE = 54
+    SYMBOL = 55
+    TEXT = 58
+    TIME_IN_FORCE = 59
+    EXEC_TYPE = 150
+    LEAVES_QTY = 151
 
 
 class OrderStatus(StrEnum):
@@ -169,6 +224,7 @@ TAG_NAMES: dict[int, str] = {
     10: "CheckSum",
     34: "MsgSeqNum",
     35: "MsgType",
+    43: "PossDupFlag",
     49: "SenderCompID",
     50: "SenderSubID",
     52: "SendingTime",
@@ -222,6 +278,7 @@ TAG_NAMES: dict[int, str] = {
     22: "SecurityIDSource",
     31: "LastPx",
     32: "LastQty",
+    37: "OrderID",
     38: "OrderQty",
     39: "OrdStatus",
     40: "OrdType",

@@ -11,7 +11,7 @@ from datetime import datetime
 from typing import Any
 
 from fixwire.core.constants import SOH
-from fixwire.core.tags import get_tag_name
+from fixwire.core.tags import Tags, get_tag_name
 from fixwire.core.time import utc_now
 
 
@@ -65,10 +65,10 @@ class FIXMessage:
 
     def __repr__(self) -> str:
         """String representation showing key tags."""
-        msg_type = self._tags.get(35, "?")
-        sender = self._tags.get(49, "?")
-        target = self._tags.get(56, "?")
-        seq = self._tags.get(34, "?")
+        msg_type = self._tags.get(Tags.MSG_TYPE, "?")
+        sender = self._tags.get(Tags.SENDER_COMP_ID, "?")
+        target = self._tags.get(Tags.TARGET_COMP_ID, "?")
+        seq = self._tags.get(Tags.MSG_SEQ_NUM, "?")
         return f"FIXMessage(type={msg_type}, sender={sender}, target={target}, seq={seq})"
 
     def __str__(self) -> str:
@@ -82,47 +82,47 @@ class FIXMessage:
     @property
     def msg_type(self) -> str:
         """Get message type (Tag 35)."""
-        return self._tags.get(35, "")
+        return self._tags.get(Tags.MSG_TYPE, "")
 
     @msg_type.setter
     def msg_type(self, value: str) -> None:
         """Set message type (Tag 35)."""
-        self._tags[35] = value
+        self._tags[Tags.MSG_TYPE] = value
 
     @property
     def sender(self) -> str:
         """Get sender (Tag 49)."""
-        return self._tags.get(49, "")
+        return self._tags.get(Tags.SENDER_COMP_ID, "")
 
     @sender.setter
     def sender(self, value: str) -> None:
         """Set sender (Tag 49)."""
-        self._tags[49] = value
+        self._tags[Tags.SENDER_COMP_ID] = value
 
     @property
     def target(self) -> str:
         """Get target (Tag 56)."""
-        return self._tags.get(56, "")
+        return self._tags.get(Tags.TARGET_COMP_ID, "")
 
     @target.setter
     def target(self, value: str) -> None:
         """Set target (Tag 56)."""
-        self._tags[56] = value
+        self._tags[Tags.TARGET_COMP_ID] = value
 
     @property
     def sequence(self) -> int:
         """Get sequence number (Tag 34)."""
-        return int(self._tags.get(34, 0))
+        return int(self._tags.get(Tags.MSG_SEQ_NUM, 0))
 
     @sequence.setter
     def sequence(self, value: int) -> None:
         """Set sequence number (Tag 34)."""
-        self._tags[34] = str(value)
+        self._tags[Tags.MSG_SEQ_NUM] = str(value)
 
     @property
     def sending_time(self) -> datetime | None:
         """Get sending time (Tag 52)."""
-        raw = self._tags.get(52, "")
+        raw = self._tags.get(Tags.SENDING_TIME, "")
         if raw:
             try:
                 return datetime.strptime(raw, "%Y%m%d-%H:%M:%S.%f")
@@ -136,7 +136,7 @@ class FIXMessage:
     @sending_time.setter
     def sending_time(self, value: datetime) -> None:
         """Set sending time (Tag 52)."""
-        self._tags[52] = value.strftime("%Y%m%d-%H:%M:%S.%f")[:-3]
+        self._tags[Tags.SENDING_TIME] = value.strftime("%Y%m%d-%H:%M:%S.%f")[:-3]
 
     def get(self, tag: int, default: str = "") -> str:
         """Get tag value with default."""
@@ -183,13 +183,13 @@ class FIXMessage:
             Bytearray containing header + body (8=, 9=, and body tags)
         """
         # Set sending time if not set
-        if 52 not in self._tags:
+        if Tags.SENDING_TIME not in self._tags:
             self.sending_time = utc_now()
 
         # Build body (everything except BeginString, BodyLength, CheckSum)
         body_parts = []
         for tag, value in self._tags.items():
-            if tag in (8, 9, 10):
+            if tag in (Tags.BEGIN_STRING, Tags.BODY_LENGTH, Tags.CHECKSUM):
                 # Skip BeginString, BodyLength, and CheckSum tags
                 continue
             body_parts.append(f"{tag}={value}{SOH}")
@@ -228,7 +228,7 @@ class FIXMessage:
         # Body is everything from tag 35 to before tag 10
         body_parts = []
         for tag, value in self._tags.items():
-            if tag in (8, 9, 10):
+            if tag in (Tags.BEGIN_STRING, Tags.BODY_LENGTH, Tags.CHECKSUM):
                 continue
             body_parts.append(f"{tag}={value}{SOH}")
 
@@ -279,166 +279,166 @@ class FIXMessage:
     @property
     def client_order_id(self) -> str:
         """Client-assigned unique order identifier (Tag 11)."""
-        return self.get(11)
+        return self.get(Tags.CL_ORD_ID)
 
     @property
     def order_id(self) -> str:
         """Exchange-assigned order identifier (Tag 37)."""
-        return self.get(37)
+        return self.get(Tags.ORDER_ID)
 
     @property
     def execution_id(self) -> str:
         """Unique execution event identifier (Tag 17)."""
-        return self.get(17)
+        return self.get(Tags.EXEC_ID)
 
     @property
     def original_client_order_id(self) -> str:
         """Original ClOrdID before a cancel/replace (Tag 41)."""
-        return self.get(41)
+        return self.get(Tags.ORIG_CL_ORD_ID)
 
     # --- Order Details ---
 
     @property
     def symbol(self) -> str:
         """Instrument ticker symbol, e.g. AAPL (Tag 55)."""
-        return self.get(55)
+        return self.get(Tags.SYMBOL)
 
     @property
     def side(self) -> str:
         """Order side: 1=Buy, 2=Sell (Tag 54)."""
-        return self.get(54)
+        return self.get(Tags.SIDE)
 
     @property
     def order_quantity(self) -> float:
         """Requested order quantity (Tag 38)."""
-        return self.get_float(38)
+        return self.get_float(Tags.ORDER_QTY)
 
     @property
     def price(self) -> float:
         """Price set by the client for the order (Tag 44)."""
-        return self.get_float(44)
+        return self.get_float(Tags.PRICE)
 
     @property
     def order_type(self) -> str:
         """Order type: 1=Market, 2=Limit, 3=Stop, etc. (Tag 40)."""
-        return self.get(40)
+        return self.get(Tags.ORD_TYPE)
 
     @property
     def time_in_force(self) -> str:
         """How long the order stays active: 0=Day, 1=GTC, 3=IOC, 4=FOK (Tag 59)."""
-        return self.get(59)
+        return self.get(Tags.TIME_IN_FORCE)
 
     @property
     def account(self) -> str:
         """Trading account identifier (Tag 1)."""
-        return self.get(1)
+        return self.get(Tags.ACCOUNT)
 
     # --- Execution / Fill Info ---
 
     @property
     def order_status(self) -> str:
         """Current order status: 0=New, 1=Partial, 2=Filled, 4=Cancelled, etc. (Tag 39)."""
-        return self.get(39)
+        return self.get(Tags.ORD_STATUS)
 
     @property
     def execution_type(self) -> str:
         """Type of execution event: 0=New, 1=Partial Fill, 2=Fill, etc. (Tag 150)."""
-        return self.get(150)
+        return self.get(Tags.EXEC_TYPE)
 
     @property
     def last_fill_quantity(self) -> float:
         """Quantity filled on this specific fill (Tag 32)."""
-        return self.get_float(32)
+        return self.get_float(Tags.LAST_QTY)
 
     @property
     def last_fill_price(self) -> float:
         """Price of this specific fill (Tag 31)."""
-        return self.get_float(31)
+        return self.get_float(Tags.LAST_PX)
 
     @property
     def filled_quantity(self) -> float:
         """Cumulative quantity filled across all fills (Tag 14)."""
-        return self.get_float(14)
+        return self.get_float(Tags.CUM_QTY)
 
     @property
     def average_price(self) -> float:
         """Volume-weighted average price of all fills (Tag 6)."""
-        return self.get_float(6)
+        return self.get_float(Tags.AVG_PX)
 
     @property
     def remaining_quantity(self) -> float:
         """Quantity still working / not yet filled (Tag 151)."""
-        return self.get_float(151)
+        return self.get_float(Tags.LEAVES_QTY)
 
     # --- Session / Protocol ---
 
     @property
     def message_type(self) -> str:
         """FIX message type code, e.g. D=NewOrderSingle (Tag 35)."""
-        return self.get(35)
+        return self.get(Tags.MSG_TYPE)
 
     @property
     def heartbeat_interval(self) -> int:
         """Heartbeat interval in seconds (Tag 108)."""
-        return self.get_int(108)
+        return self.get_int(Tags.HEART_BT_INT)
 
     @property
     def test_request_id(self) -> str:
         """Identifier echoed back in Heartbeat responses (Tag 112)."""
-        return self.get(112)
+        return self.get(Tags.TEST_REQ_ID)
 
     @property
     def reset_sequence_numbers(self) -> bool:
         """Whether to reset sequence numbers on logon (Tag 141)."""
-        return self.get(141) == "Y"
+        return self.get(Tags.RESET_SEQ_NUM_FLAG) == "Y"
 
     # --- Sequence / Resend ---
 
     @property
     def begin_sequence_number(self) -> int:
         """First sequence number in range request (Tag 7)."""
-        return self.get_int(7)
+        return self.get_int(Tags.BEGIN_SEQ_NO)
 
     @property
     def end_sequence_number(self) -> int:
         """Last sequence number in range request (Tag 16)."""
-        return self.get_int(16)
+        return self.get_int(Tags.END_SEQ_NO)
 
     @property
     def new_sequence_number(self) -> int:
         """New sequence number after reset (Tag 36)."""
-        return self.get_int(36)
+        return self.get_int(Tags.NEW_SEQ_NO)
 
     @property
     def gap_fill_flag(self) -> bool:
         """Whether SequenceReset is a gap fill vs true reset (Tag 123)."""
-        return self.get(123) == "Y"
+        return self.get(Tags.GAP_FILL_FLAG) == "Y"
 
     # --- Reject Info ---
 
     @property
     def reference_sequence_number(self) -> int:
         """Sequence number of the message being rejected (Tag 45)."""
-        return self.get_int(45)
+        return self.get_int(Tags.REF_SEQ_NUM)
 
     @property
     def reference_tag_id(self) -> int:
         """Tag number that caused the rejection (Tag 371)."""
-        return self.get_int(371)
+        return self.get_int(Tags.REF_TAG_ID)
 
     @property
     def reference_message_type(self) -> str:
         """Message type of the rejected message (Tag 372)."""
-        return self.get(372)
+        return self.get(Tags.REF_MSG_TYPE)
 
     @property
     def reject_reason(self) -> int:
         """Session-level reject reason code (Tag 373)."""
-        return self.get_int(373)
+        return self.get_int(Tags.SESSION_REJECT_REASON)
 
     # --- Misc ---
 
     @property
     def text(self) -> str:
         """Free-form text message, e.g. reject reason description (Tag 58)."""
-        return self.get(58)
+        return self.get(Tags.TEXT)
