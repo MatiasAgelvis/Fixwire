@@ -17,6 +17,7 @@ import structlog
 from fixwire.core.factory import FIXMessageFactory
 from fixwire.core.message import FIXMessage
 from fixwire.core.parser import FIXParser
+from fixwire.core.tags import MsgType, Tags
 from fixwire.core.time import utc_now
 
 logger = structlog.get_logger()
@@ -159,20 +160,24 @@ class FIXSession:
                     msg_type=msg_type,
                     seq=msg.sequence)
 
+        # Verify the incoming sequence before anything else sees the message.
+        if not await self._check_incoming_sequence(msg):
+            return
+
         # Session level messages
-        if msg_type == "A":  # Logon
+        if msg_type == MsgType.LOGON:
             await self._handle_logon(msg)
-        elif msg_type == "5":  # Logout
+        elif msg_type == MsgType.LOGOUT:
             await self._handle_logout(msg)
-        elif msg_type == "0":  # Heartbeat
+        elif msg_type == MsgType.HEARTBEAT:
             await self._handle_heartbeat(msg)
-        elif msg_type == "1":  # TestRequest
+        elif msg_type == MsgType.TEST_REQUEST:
             await self._handle_test_request(msg)
-        elif msg_type == "2":  # ResendRequest
+        elif msg_type == MsgType.RESEND_REQUEST:
             await self._handle_resend_request(msg)
-        elif msg_type == "3":  # Reject
+        elif msg_type == MsgType.REJECT:
             await self._handle_reject(msg)
-        elif msg_type == "4":  # SequenceReset
+        elif msg_type == MsgType.SEQUENCE_RESET:
             await self._handle_sequence_reset(msg)
 
         # Notify callbacks
@@ -186,10 +191,83 @@ class FIXSession:
                            error=str(e),
                            msg_type=msg_type)
 
+    async def _check_incoming_sequence(self, msg: FIXMessage) -> bool:
+        """Verify MsgSeqNum (34) against the expected next incoming number.
+
+        Returns True when the message should be dispatched, False when this
+        method already handled the condition (gap request, duplicate, or
+        session termination).
+
+        Logon and SequenceReset are exempt: they establish or adjust the
+        baseline rather than being checked against it. The check only runs
+        once the session is logged on, so handshake messages cannot trigger
+        a ResendRequest.
+        """
+        if self.status != SessionStatus.LOGGED_ON:
+            return True
+        if msg.msg_type in (MsgType.LOGON, MsgType.SEQUENCE_RESET):
+            return True
+
+        expected = self.get_next_expected_seq_num()
+        received = msg.sequence
+
+        if received == expected:
+            self._state.incoming_seq_num = received
+            return True
+
+        if received > expected:
+            # Gap: ask for the missing range and do not process this message.
+            logger.warning("session.sequence_gap",
+                           expected=expected,
+                           received=received)
+            await self._request_resend(expected, received - 1)
+            return False
+
+        if msg.get(Tags.POSS_DUP_FLAG) == "Y":  # a retransmission, already seen
+            logger.debug("session.duplicate_ignored",
+                         expected=expected,
+                         received=received)
+            return False
+
+        logger.error("session.sequence_too_low",
+                     expected=expected,
+                     received=received)
+        await self._terminate_sequence_too_low(expected, received)
+        return False
+
+    async def _request_resend(self, begin: int, end: int) -> None:
+        """Queue a ResendRequest for the missing sequence range."""
+        request = FIXMessageFactory.create_resend_request(
+            sender=self.config.sender_comp_id,
+            target=self.config.target_comp_id,
+            seq=0,  # Will be set by send()
+            begin_seq_no=begin,
+            end_seq_no=end,
+        )
+        await self.send(request)
+
+    async def _terminate_sequence_too_low(
+        self, expected: int, received: int
+    ) -> None:
+        """Terminate the session per FIX 4.4: queue Logout, move to ERROR."""
+        logout = FIXMessageFactory.create_logout(
+            sender=self.config.sender_comp_id,
+            target=self.config.target_comp_id,
+            seq=0,  # Will be set by send()
+            text=f"MsgSeqNum too low, expecting {expected} but received {received}",
+        )
+        await self.send(logout)
+        self.status = SessionStatus.ERROR
+
     async def _handle_logon(self, msg: FIXMessage) -> None:
-        """Handle Logon message."""
+        """Handle Logon message.
+
+        Both roles consume the Logon, so both set the incoming baseline to
+        its MsgSeqNum: the next expected message is ``msg.sequence + 1``.
+        """
         if self.status == SessionStatus.WAITING_LOGON:
             # We initiated logon, received response
+            self._state.incoming_seq_num = msg.sequence
             self.status = SessionStatus.LOGGED_ON
             self._state.logon_time = utc_now()
             logger.info("session.logon_success",
@@ -198,7 +276,7 @@ class FIXSession:
         elif self.status in (SessionStatus.DISCONNECTED, SessionStatus.CONNECTING):
             # We received logon, need to respond
             self.status = SessionStatus.WAITING_LOGON
-            self._state.incoming_seq_num = msg.sequence - 1
+            self._state.incoming_seq_num = msg.sequence
 
             # Send logon response using factory
             response = FIXMessageFactory.create_logon(
@@ -224,7 +302,7 @@ class FIXSession:
         else:
             # We received logout request, send response
             response = FIXMessage()
-            response.msg_type = "5"
+            response.msg_type = MsgType.LOGOUT
             await self.send(response)
             self.status = SessionStatus.DISCONNECTED
             logger.info("session.logout_received")
@@ -233,14 +311,14 @@ class FIXSession:
         """Handle Heartbeat message."""
         # Check if this is response to our TestRequest
         if (self._state.test_request_id and
-            msg.get(112) == self._state.test_request_id):
+            msg.get(Tags.TEST_REQ_ID) == self._state.test_request_id):
             self._state.test_request_id = None
             self._state.test_request_time = None
             logger.debug("session.heartbeat_test_response_received")
 
     async def _handle_test_request(self, msg: FIXMessage) -> None:
         """Handle TestRequest message."""
-        test_req_id = msg.get(112)
+        test_req_id = msg.get(Tags.TEST_REQ_ID)
         if test_req_id:
             # Respond with Heartbeat containing TestReqID
             heartbeat = FIXMessageFactory.create_heartbeat(
@@ -264,9 +342,9 @@ class FIXSession:
         # TODO: Implement actual message resend
         new_seq = end_seq + 1 if end_seq > 0 else self._state.outgoing_seq_num + 1
         seq_reset = FIXMessage()
-        seq_reset.msg_type = "4"
-        seq_reset.set(36, str(new_seq))
-        seq_reset.set(123, "Y")  # GapFillFlag
+        seq_reset.msg_type = MsgType.SEQUENCE_RESET
+        seq_reset.set(Tags.NEW_SEQ_NO, str(new_seq))
+        seq_reset.set(Tags.GAP_FILL_FLAG, "Y")
         await self.send(seq_reset)
 
     async def _handle_reject(self, msg: FIXMessage) -> None:
@@ -378,8 +456,8 @@ class FIXSession:
         self._state.test_request_time = now
 
         test_req = FIXMessage()
-        test_req.msg_type = "1"
-        test_req.set(112, test_req_id)
+        test_req.msg_type = MsgType.TEST_REQUEST
+        test_req.set(Tags.TEST_REQ_ID, test_req_id)
         await self.send(test_req)
 
     def get_next_expected_seq_num(self) -> int:

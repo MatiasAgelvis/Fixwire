@@ -204,6 +204,182 @@ class TestFIXSessionSequenceNumbers:
         assert session.get_next_expected_seq_num() == 1
 
 
+class TestFIXSessionLogonBaseline:
+    """Receiving a Logon establishes the incoming sequence baseline.
+
+    Both roles must set it, and it must reflect the Logon as *consumed*:
+    after a Logon with MsgSeqNum N, the next expected message is N+1.
+    Getting this wrong makes the first post-logon message look like a gap
+    once incoming sequence verification is enabled.
+    """
+
+    @pytest.mark.asyncio
+    async def test_initiator_logon_sets_baseline(self, session):
+        """Initiator: the peer's Logon reply sets the baseline."""
+        # Arrange: we sent the Logon and are awaiting the reply
+        session.status = SessionStatus.WAITING_LOGON
+        logon = FIXMessageFactory.create_logon("SERVER", "CLIENT", seq=42)
+
+        # Act
+        await session.receive(logon.serialize())
+
+        # Assert: seq 42 consumed, so 43 is next expected
+        assert session.status == SessionStatus.LOGGED_ON
+        assert session._state.incoming_seq_num == 42
+        assert session.get_next_expected_seq_num() == 43
+
+    @pytest.mark.asyncio
+    async def test_acceptor_logon_sets_baseline(self, session):
+        """Acceptor: the peer's Logon establishes the baseline."""
+        # Arrange: we are accepting an inbound Logon
+        logon = FIXMessageFactory.create_logon("SERVER", "CLIENT", seq=7)
+
+        # Act
+        await session.receive(logon.serialize())
+
+        # Assert: seq 7 consumed, so 8 is next expected
+        assert session.status == SessionStatus.LOGGED_ON
+        assert session._state.incoming_seq_num == 7
+        assert session.get_next_expected_seq_num() == 8
+
+
+class TestFIXSessionIncomingSequence:
+    """Incoming sequence number verification (FIX 4.4).
+
+    Every non-Logon, non-SequenceReset message is checked against the
+    expected next incoming MsgSeqNum:
+
+    - equal        -> process, advance
+    - greater      -> gap: send ResendRequest, do not process
+    - lower + PossDupFlag -> duplicate: ignore
+    - lower        -> terminate: send Logout, move to ERROR
+    """
+
+    @pytest.mark.asyncio
+    async def test_accepts_expected_sequence(self, session):
+        """A message with the expected MsgSeqNum is processed and advances."""
+        # Arrange
+        session.status = SessionStatus.LOGGED_ON
+        msg = FIXMessageFactory.create_heartbeat("SERVER", "CLIENT", seq=1)
+
+        # Act
+        await session.receive(msg.serialize())
+
+        # Assert
+        assert session._state.incoming_seq_num == 1
+        assert session.get_next_expected_seq_num() == 2
+
+    @pytest.mark.asyncio
+    async def test_accepts_ordered_stream(self, session):
+        """Consecutive in-sequence messages are all processed."""
+        # Arrange
+        session.status = SessionStatus.LOGGED_ON
+
+        # Act
+        for seq in (1, 2, 3):
+            msg = FIXMessageFactory.create_heartbeat("SERVER", "CLIENT", seq=seq)
+            await session.receive(msg.serialize())
+
+        # Assert
+        assert session._state.incoming_seq_num == 3
+        assert session._send_queue.empty()
+
+    @pytest.mark.asyncio
+    async def test_gap_sends_resend_request(self, session):
+        """A MsgSeqNum above expected requests the missing range."""
+        # Arrange: expecting 1, receive 5
+        session.status = SessionStatus.LOGGED_ON
+        msg = FIXMessageFactory.create_heartbeat("SERVER", "CLIENT", seq=5)
+
+        # Act
+        await session.receive(msg.serialize())
+
+        # Assert: ResendRequest for 1..4
+        request = session._send_queue.get_nowait()
+        assert request[35] == MsgType.RESEND_REQUEST
+        assert request[7] == "1"
+        assert request[16] == "4"
+
+    @pytest.mark.asyncio
+    async def test_gap_does_not_dispatch_message(self, session):
+        """The out-of-order message is not handed to the application."""
+        # Arrange
+        session.status = SessionStatus.LOGGED_ON
+        received = []
+        session.on_message(received.append)
+        msg = FIXMessageFactory.create_heartbeat("SERVER", "CLIENT", seq=5)
+
+        # Act
+        await session.receive(msg.serialize())
+
+        # Assert
+        assert received == []
+        assert session._state.incoming_seq_num == 0  # not advanced
+
+    @pytest.mark.asyncio
+    async def test_duplicate_ignored_when_poss_dup(self, session):
+        """A low MsgSeqNum with PossDupFlag=Y is silently ignored."""
+        # Arrange: already at 5, receive a duplicate of 3
+        session.status = SessionStatus.LOGGED_ON
+        session._state.incoming_seq_num = 5
+        msg = FIXMessageFactory.create_heartbeat("SERVER", "CLIENT", seq=3)
+        msg.set(43, "Y")
+
+        # Act
+        await session.receive(msg.serialize())
+
+        # Assert: unchanged, nothing sent, still logged on
+        assert session._state.incoming_seq_num == 5
+        assert session._send_queue.empty()
+        assert session.status == SessionStatus.LOGGED_ON
+
+    @pytest.mark.asyncio
+    async def test_low_sequence_logs_out(self, session):
+        """A low MsgSeqNum without PossDupFlag terminates the session."""
+        # Arrange: already at 5, receive 3
+        session.status = SessionStatus.LOGGED_ON
+        session._state.incoming_seq_num = 5
+        msg = FIXMessageFactory.create_heartbeat("SERVER", "CLIENT", seq=3)
+
+        # Act
+        await session.receive(msg.serialize())
+
+        # Assert: Logout queued with the expected/actual detail, session ERROR
+        logout = session._send_queue.get_nowait()
+        assert logout[35] == MsgType.LOGOUT
+        assert "too low" in logout[58]
+        assert session.status == SessionStatus.ERROR
+
+    @pytest.mark.asyncio
+    async def test_logon_exempt_from_sequence_check(self, session):
+        """A Logon establishes the baseline instead of being checked."""
+        # Arrange: not logged on, Logon arrives with an arbitrary seq
+        logon = FIXMessageFactory.create_logon("SERVER", "CLIENT", seq=50)
+
+        # Act
+        await session.receive(logon.serialize())
+
+        # Assert: no ResendRequest; baseline set from the Logon
+        assert session.status == SessionStatus.LOGGED_ON
+        assert session._state.incoming_seq_num == 50
+
+    @pytest.mark.asyncio
+    async def test_gap_fill_advances_expected(self, session):
+        """SequenceReset-GapFill adjusts the expected next number."""
+        # Arrange
+        session.status = SessionStatus.LOGGED_ON
+        reset = FIXMessageFactory.create_sequence_reset(
+            "SERVER", "CLIENT", seq=1, new_seq_no=10, gap_fill=True
+        )
+
+        # Act
+        await session.receive(reset.serialize())
+
+        # Assert: next expected is the NewSeqNo
+        assert session._state.incoming_seq_num == 9
+        assert session.get_next_expected_seq_num() == 10
+
+
 class TestFIXSessionDisconnect:
     """disconnect() is a pure state transition — it must not wait.
 

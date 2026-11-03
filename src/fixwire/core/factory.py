@@ -8,6 +8,7 @@ from __future__ import annotations
 import structlog
 
 from fixwire.core.message import FIXMessage
+from fixwire.core.tags import MsgType, Tags
 
 logger = structlog.get_logger()
 
@@ -35,12 +36,12 @@ class FIXMessageFactory:
             Configured FIXMessage.
         """
         msg = FIXMessage()
-        msg.msg_type = "0"
+        msg.msg_type = MsgType.HEARTBEAT
         msg.sender = sender
         msg.target = target
         msg.sequence = seq
         if test_req_id:
-            msg.set(112, test_req_id)
+            msg.set(Tags.TEST_REQ_ID, test_req_id)
         return msg
 
     @staticmethod
@@ -58,11 +59,11 @@ class FIXMessageFactory:
             Configured FIXMessage.
         """
         msg = FIXMessage()
-        msg.msg_type = "1"
+        msg.msg_type = MsgType.TEST_REQUEST
         msg.sender = sender
         msg.target = target
         msg.sequence = seq
-        msg.set(112, test_req_id)
+        msg.set(Tags.TEST_REQ_ID, test_req_id)
         return msg
 
     @staticmethod
@@ -82,14 +83,14 @@ class FIXMessageFactory:
             Configured FIXMessage.
         """
         msg = FIXMessage()
-        msg.msg_type = "A"
+        msg.msg_type = MsgType.LOGON
         msg.sender = sender
         msg.target = target
         msg.sequence = seq
-        msg.set(98, "0")  # EncryptMethod = None
-        msg.set(108, str(heartbeat_interval))
+        msg.set(Tags.ENCRYPT_METHOD, "0")  # EncryptMethod = None
+        msg.set(Tags.HEART_BT_INT, str(heartbeat_interval))
         if reset_seq_num:
-            msg.set(141, "Y")
+            msg.set(Tags.RESET_SEQ_NUM_FLAG, "Y")
         return msg
 
     @staticmethod
@@ -107,12 +108,12 @@ class FIXMessageFactory:
             Configured FIXMessage.
         """
         msg = FIXMessage()
-        msg.msg_type = "5"
+        msg.msg_type = MsgType.LOGOUT
         msg.sender = sender
         msg.target = target
         msg.sequence = seq
         if text:
-            msg.set(58, text)
+            msg.set(Tags.TEXT, text)
         return msg
 
     @staticmethod
@@ -137,19 +138,19 @@ class FIXMessageFactory:
             Configured FIXMessage.
         """
         msg = FIXMessage()
-        msg.msg_type = "3"
+        msg.msg_type = MsgType.REJECT
         msg.sender = sender
         msg.target = target
         msg.sequence = seq
-        msg.set(45, str(ref_seq_num))
+        msg.set(Tags.REF_SEQ_NUM, str(ref_seq_num))
         if ref_tag_id is not None:
-            msg.set(371, str(ref_tag_id))
+            msg.set(Tags.REF_TAG_ID, str(ref_tag_id))
         if ref_msg_type is not None:
-            msg.set(372, ref_msg_type)
+            msg.set(Tags.REF_MSG_TYPE, ref_msg_type)
         if session_reject_reason is not None:
-            msg.set(373, str(session_reject_reason))
+            msg.set(Tags.SESSION_REJECT_REASON, str(session_reject_reason))
         if text:
-            msg.set(58, text)
+            msg.set(Tags.TEXT, text)
         return msg
 
     @staticmethod
@@ -168,12 +169,12 @@ class FIXMessageFactory:
             Configured FIXMessage.
         """
         msg = FIXMessage()
-        msg.msg_type = "2"
+        msg.msg_type = MsgType.RESEND_REQUEST
         msg.sender = sender
         msg.target = target
         msg.sequence = seq
-        msg.set(7, str(begin_seq_no))
-        msg.set(16, str(end_seq_no))
+        msg.set(Tags.BEGIN_SEQ_NO, str(begin_seq_no))
+        msg.set(Tags.END_SEQ_NO, str(end_seq_no))
         return msg
 
     @staticmethod
@@ -192,11 +193,11 @@ class FIXMessageFactory:
             Configured FIXMessage.
         """
         msg = FIXMessage()
-        msg.msg_type = "4"
+        msg.msg_type = MsgType.SEQUENCE_RESET
         msg.sender = sender
         msg.target = target
         msg.sequence = seq
-        msg.set(36, str(new_seq_no))
+        msg.set(Tags.NEW_SEQ_NO, str(new_seq_no))
         if gap_fill:
-            msg.set(123, "Y")
+            msg.set(Tags.GAP_FILL_FLAG, "Y")
         return msg
