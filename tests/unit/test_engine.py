@@ -1,6 +1,7 @@
 """Tests for FIXEngine."""
 
 import asyncio
+from datetime import timedelta
 from unittest.mock import AsyncMock
 
 import pytest
@@ -8,6 +9,7 @@ import pytest
 from fixwire.core.factory import FIXMessageFactory
 from fixwire.core.session import FIXSession, SessionConfig, SessionStatus
 from fixwire.core.tags import MsgType
+from fixwire.core.time import utc_now
 from fixwire.engine import FIXEngine
 from fixwire.transport import InMemoryTransport
 
@@ -648,6 +650,95 @@ class TestFIXEngineCoordination:
         assert session._state.test_request_id is None
 
 
+class TestFIXEngineHeartbeat:
+    """The heartbeat task: drive session checks and own ERROR teardown.
+
+    The session exposes check_heartbeat() as a pure decision but owns no
+    timers. The engine's heartbeat task supplies the tick, and is also the
+    place that notices a session entering ERROR and tears the engine down.
+    """
+
+    @pytest.mark.asyncio
+    async def test_start_spawns_heartbeat_task(self, engine):
+        """start() spawns the heartbeat task alongside reader and writer."""
+        # Act
+        await engine.start()
+
+        # Assert
+        assert engine._heartbeat_task is not None
+
+        # Cleanup
+        await engine.stop()
+
+    @pytest.mark.asyncio
+    async def test_heartbeat_probes_silent_peer(self, engine, session, transport):
+        """A silent peer produces a TestRequest on the wire."""
+        # Arrange
+        engine._heartbeat_poll = 0.01
+        session.status = SessionStatus.LOGGED_ON
+        session._state.last_received_time = utc_now() - timedelta(
+            seconds=session.config.heartbeat_interval * 2
+        )
+
+        # Act
+        await engine.start()
+        await _wait_until(
+            lambda: any(b"35=1" in d for d in transport.sent), timeout=1.0
+        )
+
+        # Assert
+        assert any(b"35=1" in d for d in transport.sent)
+
+        # Cleanup
+        await engine.stop()
+
+    @pytest.mark.asyncio
+    async def test_tears_down_when_session_enters_error(
+        self, engine, session, transport
+    ):
+        """A session-driven ERROR triggers teardown without an external call."""
+        # Arrange
+        engine._heartbeat_poll = 0.01
+        session.status = SessionStatus.LOGGED_ON
+        await engine.start()
+
+        # Act: something else (e.g. seq too low) moves the session to ERROR
+        session.status = SessionStatus.ERROR
+        await _wait_until(lambda: engine._stop_event.is_set(), timeout=1.0)
+
+        # Assert: transport closed and no task left running
+        assert engine._stop_event.is_set()
+        assert transport.is_connected is False
+        await _wait_until(
+            lambda: all(
+                t is None or t.done()
+                for t in (
+                    engine._writer_task,
+                    engine._reader_task,
+                    engine._heartbeat_task,
+                )
+            ),
+            timeout=1.0,
+        )
+
+    @pytest.mark.asyncio
+    async def test_heartbeat_does_not_set_error_on_clean_stop(
+        self, engine, session
+    ):
+        """Stopping the engine is not treated as a heartbeat failure."""
+        # Arrange
+        engine._heartbeat_poll = 0.01
+        session.status = SessionStatus.LOGGED_ON
+        await engine.start()
+
+        # Act
+        await engine.stop()
+
+        # Assert
+        assert session.status == SessionStatus.LOGGED_ON
+        assert engine._heartbeat_task is None
+
+
 async def _drain_writer(engine: FIXEngine, timeout: float = 2.0) -> None:
     """Wait until the session queue is empty and the writer has had a
     chance to flush the last message.
@@ -691,6 +782,15 @@ async def _wait_for_sent(
             raise TimeoutError(
                 f"data not in transport.sent within {timeout}s"
             )
+        await asyncio.sleep(0.01)
+
+
+async def _wait_until(predicate, timeout: float) -> None:
+    """Wait until ``predicate()`` is truthy, or raise TimeoutError."""
+    deadline = asyncio.get_event_loop().time() + timeout
+    while not predicate():
+        if asyncio.get_event_loop().time() > deadline:
+            raise TimeoutError(f"condition not met within {timeout}s")
         await asyncio.sleep(0.01)
 
 

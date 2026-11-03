@@ -23,6 +23,12 @@ logger = structlog.get_logger()
 # large enough not to burn CPU in idle sessions.
 _IDLE_POLL = 0.05
 
+# How often the heartbeat task wakes. It drives session.check_heartbeat()
+# (which decides internally whether anything is due) and also notices a
+# session that has entered ERROR. Bounds both heartbeat responsiveness and
+# ERROR teardown latency.
+_HEARTBEAT_POLL = 1.0
+
 
 class FIXEngine:
     """Coordinates a FIXSession with a Transport.
@@ -42,6 +48,8 @@ class FIXEngine:
         self._closed = False
         self._writer_task: asyncio.Task[None] | None = None
         self._reader_task: asyncio.Task[None] | None = None
+        self._heartbeat_task: asyncio.Task[None] | None = None
+        self._heartbeat_poll = _HEARTBEAT_POLL
         self._stop_event = asyncio.Event()
 
     # --- Lifecycle ---
@@ -160,6 +168,9 @@ class FIXEngine:
         self._reader_task = asyncio.create_task(
             self._reader_loop(), name="fixwire-engine-reader"
         )
+        self._heartbeat_task = asyncio.create_task(
+            self._heartbeat_loop(), name="fixwire-engine-heartbeat"
+        )
 
     async def stop(self) -> None:
         """Signal I/O tasks to stop and wait for them. Idempotent.
@@ -170,7 +181,11 @@ class FIXEngine:
         raise — the reader's task guard sees ``_stop_event`` is set and
         exits cleanly without setting ERROR.
         """
-        if self._writer_task is None and self._reader_task is None:
+        if (
+            self._writer_task is None
+            and self._reader_task is None
+            and self._heartbeat_task is None
+        ):
             return
         self._stop_event.set()
         # Close the transport so a reader blocked in receive() wakes up.
@@ -178,7 +193,7 @@ class FIXEngine:
             await self._transport.close()
         except Exception:
             pass
-        for task in (self._writer_task, self._reader_task):
+        for task in (self._writer_task, self._reader_task, self._heartbeat_task):
             if task is None or task.done():
                 continue
             try:
@@ -187,6 +202,7 @@ class FIXEngine:
                 task.cancel()
         self._writer_task = None
         self._reader_task = None
+        self._heartbeat_task = None
 
     # --- Writer task ---
 
@@ -217,6 +233,39 @@ class FIXEngine:
             raise
         except Exception as e:
             raise ConnectionError(f"transport.send failed: {e}") from e
+
+    async def _heartbeat_loop(self) -> None:
+        """Drive session heartbeat checks and react to ERROR.
+
+        The session owns the heartbeat *decision* but no timers; this task
+        supplies the tick. It also watches for a session that has entered
+        ERROR (for example a too-low sequence number) and tears the engine
+        down, since nothing else observes that transition once connected.
+
+        Deliberately does not call ``stop()``: that would await this very
+        task and deadlock. Setting ``_stop_event`` and closing the
+        transport is enough — the sibling loops exit on their next poll.
+        """
+        while not self._stop_event.is_set():
+            if self._session.status == SessionStatus.ERROR:
+                logger.warning("engine.session_error",
+                               sender=self._session.config.sender_comp_id,
+                               target=self._session.config.target_comp_id)
+                self._stop_event.set()
+                try:
+                    await self._transport.close()
+                except Exception:
+                    pass
+                return
+            await self._session.check_heartbeat()
+            # Sleep until the next tick, but wake immediately on shutdown so
+            # stop() is not delayed by a full poll interval.
+            try:
+                await asyncio.wait_for(
+                    self._stop_event.wait(), timeout=self._heartbeat_poll
+                )
+            except TimeoutError:
+                pass
 
     async def _reader_loop(self) -> None:
         """Drain transport.receive(), feed session.receive().

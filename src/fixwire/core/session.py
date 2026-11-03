@@ -441,7 +441,9 @@ class FIXSession:
         else:
             time_since_last = self.config.heartbeat_interval * 2
 
-        if time_since_last < self.config.heartbeat_interval:
+        # FIX 4.4 allows ~120% of the interval before probing a silent peer.
+        grace = self.config.heartbeat_interval * 1.2
+        if time_since_last < grace:
             return
 
         if self._state.test_request_id:

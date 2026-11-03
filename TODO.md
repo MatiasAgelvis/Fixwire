@@ -3,6 +3,58 @@
 Backlog for work that came up but is out of scope for the current task.
 Do these soon — before they grow too large.
 
+## Server Side
+
+### [ ] `FIXServer` — overseer for concurrent client sessions
+
+**Problem:** nothing manages server-side sessions. `WebSocketServer` only
+tracks raw sockets, keyed by `"ip:port"`. Each connection handler must
+build its own adapter + `FIXSession` + `FIXEngine` and remember to
+`disconnect()` — the only working example is inline in
+`tests/integration/test_engine_e2e.py`. That means: no FIX session
+registry, no duplicate-logon detection, no connection cap, no
+centralized cleanup, no way to list active sessions.
+
+**Why the socket key is not enough:** FIX sessions are identified by
+`(SenderCompID, TargetCompID)`. On the server the client's
+`SenderCompID` is our `TargetCompID`. Two connections from the same
+counterparty are the *same* FIX session, and running both corrupts the
+sequence numbers of both. Duplicate logon must log out the old session
+(or refuse the new one) per spec.
+
+**Shape:**
+
+```python
+class FIXServer:
+    def __init__(self, config_factory, host, port, max_sessions=100): ...
+    async def start(self): ...
+    async def stop(self): ...            # stop every engine, then the WS server
+    async def _on_connection(self, ws):
+        adapter = WebSocketTransportAdapter(ws)
+        session = FIXSession(config_factory())
+        engine  = FIXEngine(session, adapter)
+        # register by (sender, target) -> duplicate policy -> try/finally disconnect
+    def sessions(self) -> list[FIXEngine]: ...   # introspection
+```
+
+**Test sketch:**
+
+```
+test_two_clients_get_independent_sessions      each has own seq + state
+test_duplicate_logon_replaces_or_rejects        same comp IDs -> policy
+test_disconnect_deregisters_and_stops_engine    no task leak
+test_max_sessions_rejects_extra_connection      cap enforced
+test_stop_tears_down_all_sessions               server.stop() drains
+test_sessions_exposes_active_engines            introspection
+```
+
+**Placement:** not in any milestone today. `MILESTONES.md` puts the
+*accept role* in M6 (`SessionRole`), but the concurrency manager is
+needed to run a server at all. Recommended order: after M2 heartbeat,
+before M3 reconnect — per-session reconnect is much easier once a
+manager owns the sessions. It is also the natural attach point for the
+per-session dispatcher discussed for M6.
+
 ## Test Infrastructure
 
 ### [ ] Centralize test fixtures/builders
