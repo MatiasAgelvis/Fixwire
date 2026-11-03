@@ -90,6 +90,43 @@ class TestFIXSessionHeartbeatDecision:
         assert session._state.test_request_id is None
 
     @pytest.mark.asyncio
+    async def test_noop_within_grace_window(self, session):
+        """FIX 4.4 allows ~120% of the interval before probing.
+
+        A peer silent for 1.1x the interval is still within the grace
+        window and must not trigger a TestRequest.
+        """
+        # Arrange
+        session.status = SessionStatus.LOGGED_ON
+        session._state.last_received_time = utc_now() - timedelta(
+            seconds=session.config.heartbeat_interval * 1.1
+        )
+
+        # Act
+        await session.check_heartbeat()
+
+        # Assert
+        assert session._send_queue.empty()
+        assert session._state.test_request_id is None
+
+    @pytest.mark.asyncio
+    async def test_probes_after_grace_window(self, session):
+        """A peer silent beyond 1.2x the interval triggers a TestRequest."""
+        # Arrange
+        session.status = SessionStatus.LOGGED_ON
+        session._state.last_received_time = utc_now() - timedelta(
+            seconds=session.config.heartbeat_interval * 1.3
+        )
+
+        # Act
+        await session.check_heartbeat()
+
+        # Assert
+        assert not session._send_queue.empty()
+        msg = session._send_queue.get_nowait()
+        assert msg[35] == MsgType.TEST_REQUEST
+
+    @pytest.mark.asyncio
     async def test_sends_test_request_when_peer_silent(self, session):
         """Test that a silent peer triggers a TestRequest."""
         # Arrange
