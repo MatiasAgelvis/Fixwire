@@ -55,6 +55,58 @@ before M3 reconnect — per-session reconnect is much easier once a
 manager owns the sessions. It is also the natural attach point for the
 per-session dispatcher discussed for M6.
 
+## Protocol Correctness (M2 follow-ups)
+
+### [ ] Bounded drain on teardown
+
+**Problem:** teardown can drop an outbound `Logout`.
+
+- `session._terminate_sequence_too_low()` does `await self.send(logout)`
+  then `self.status = ERROR`. The engine's heartbeat loop notices ERROR,
+  sets `_stop_event`, and closes the transport. The writer loop is
+  `while not self._stop_event.is_set()`, so it exits **without draining**
+  the queue. The writer polls at 50 ms and the heartbeat at 1 s, so the
+  writer usually wins — but "usually" is not a guarantee.
+- The heartbeat-timeout path is worse: it never queues a Logout at all,
+  so the peer is disconnected without being told why (FIX 4.4 says send
+  Logout, then disconnect).
+- `tests/unit/core/test_session.py` only asserts the Logout is *queued*,
+  never that it reaches the wire.
+
+**Root cause:** `stop()` signals and closes in one step, with no chance
+for the writer to flush.
+
+**Sketch:**
+
+- Writer loop exits when `_stop_event.is_set() and queue.empty()` rather
+  than immediately on the flag, so it drains what is already queued.
+- `stop()`: set `_stop_event`, await reader + heartbeat (they exit on
+  their poll), await writer bounded (drains), *then* close the transport.
+- Heartbeat loop on ERROR: same order — set flag, await writer bounded,
+  close transport. It may await the writer because that is a different
+  task; it must still never await itself.
+
+**Tests:**
+
+```
+test_seq_too_low_logout_reaches_the_wire     not just queued
+test_stop_drains_queue_before_closing        queued msgs are sent
+test_stop_is_bounded_when_transport_is_dead  no hang on flush failure
+test_heartbeat_timeout_sends_logout          spec-required Logout
+test_writer_exits_when_stopped_and_empty     no busy loop after drain
+```
+
+### [ ] Outbound heartbeat generation
+
+We probe silent peers and answer their TestRequests, but never send a
+proactive `Heartbeat` when idle. FIX 4.4 expects each side to send one
+if no data has gone out within `HeartBtInt`. Interop currently works only
+because a strict peer probes us and we answer — we are not holding up
+our half of the contract.
+
+Likely a `session.check_heartbeat_send()` driven by the same engine
+task, using `_state.last_sent_time` (already maintained by `send()`).
+
 ## Test Infrastructure
 
 ### [ ] Centralize test fixtures/builders
