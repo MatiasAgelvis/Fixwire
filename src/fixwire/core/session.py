@@ -160,6 +160,10 @@ class FIXSession:
                     msg_type=msg_type,
                     seq=msg.sequence)
 
+        # Verify the incoming sequence before anything else sees the message.
+        if not await self._check_incoming_sequence(msg):
+            return
+
         # Session level messages
         if msg_type == MsgType.LOGON:
             await self._handle_logon(msg)
@@ -187,10 +191,83 @@ class FIXSession:
                            error=str(e),
                            msg_type=msg_type)
 
+    async def _check_incoming_sequence(self, msg: FIXMessage) -> bool:
+        """Verify MsgSeqNum (34) against the expected next incoming number.
+
+        Returns True when the message should be dispatched, False when this
+        method already handled the condition (gap request, duplicate, or
+        session termination).
+
+        Logon and SequenceReset are exempt: they establish or adjust the
+        baseline rather than being checked against it. The check only runs
+        once the session is logged on, so handshake messages cannot trigger
+        a ResendRequest.
+        """
+        if self.status != SessionStatus.LOGGED_ON:
+            return True
+        if msg.msg_type in (MsgType.LOGON, MsgType.SEQUENCE_RESET):
+            return True
+
+        expected = self.get_next_expected_seq_num()
+        received = msg.sequence
+
+        if received == expected:
+            self._state.incoming_seq_num = received
+            return True
+
+        if received > expected:
+            # Gap: ask for the missing range and do not process this message.
+            logger.warning("session.sequence_gap",
+                           expected=expected,
+                           received=received)
+            await self._request_resend(expected, received - 1)
+            return False
+
+        if msg.get(Tags.POSS_DUP_FLAG) == "Y":  # a retransmission, already seen
+            logger.debug("session.duplicate_ignored",
+                         expected=expected,
+                         received=received)
+            return False
+
+        logger.error("session.sequence_too_low",
+                     expected=expected,
+                     received=received)
+        await self._terminate_sequence_too_low(expected, received)
+        return False
+
+    async def _request_resend(self, begin: int, end: int) -> None:
+        """Queue a ResendRequest for the missing sequence range."""
+        request = FIXMessageFactory.create_resend_request(
+            sender=self.config.sender_comp_id,
+            target=self.config.target_comp_id,
+            seq=0,  # Will be set by send()
+            begin_seq_no=begin,
+            end_seq_no=end,
+        )
+        await self.send(request)
+
+    async def _terminate_sequence_too_low(
+        self, expected: int, received: int
+    ) -> None:
+        """Terminate the session per FIX 4.4: queue Logout, move to ERROR."""
+        logout = FIXMessageFactory.create_logout(
+            sender=self.config.sender_comp_id,
+            target=self.config.target_comp_id,
+            seq=0,  # Will be set by send()
+            text=f"MsgSeqNum too low, expecting {expected} but received {received}",
+        )
+        await self.send(logout)
+        self.status = SessionStatus.ERROR
+
     async def _handle_logon(self, msg: FIXMessage) -> None:
-        """Handle Logon message."""
+        """Handle Logon message.
+
+        Both roles consume the Logon, so both set the incoming baseline to
+        its MsgSeqNum: the next expected message is ``msg.sequence + 1``.
+        """
         if self.status == SessionStatus.WAITING_LOGON:
             # We initiated logon, received response
+            self._state.incoming_seq_num = msg.sequence
             self.status = SessionStatus.LOGGED_ON
             self._state.logon_time = utc_now()
             logger.info("session.logon_success",
@@ -199,7 +276,7 @@ class FIXSession:
         elif self.status in (SessionStatus.DISCONNECTED, SessionStatus.CONNECTING):
             # We received logon, need to respond
             self.status = SessionStatus.WAITING_LOGON
-            self._state.incoming_seq_num = msg.sequence - 1
+            self._state.incoming_seq_num = msg.sequence
 
             # Send logon response using factory
             response = FIXMessageFactory.create_logon(
