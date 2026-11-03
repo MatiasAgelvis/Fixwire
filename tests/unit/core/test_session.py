@@ -160,7 +160,28 @@ class TestFIXSessionHeartbeatDecision:
 
         # Assert
         assert session.status == SessionStatus.ERROR
-        assert session._send_queue.empty()
+
+    @pytest.mark.asyncio
+    async def test_heartbeat_timeout_queues_logout(self, session):
+        """An unanswered TestRequest terminates with a Logout, per FIX 4.4.
+
+        The peer should be told why the session is ending, not just have
+        the transport cut.
+        """
+        # Arrange
+        session.status = SessionStatus.LOGGED_ON
+        session._state.test_request_id = "PREV-REQ"
+        session._state.last_received_time = utc_now() - timedelta(
+            seconds=session.config.heartbeat_interval * 2
+        )
+
+        # Act
+        await session.check_heartbeat()
+
+        # Assert: Logout queued before the session parks in ERROR
+        logout = session._send_queue.get_nowait()
+        assert logout[35] == MsgType.LOGOUT
+        assert session.status == SessionStatus.ERROR
 
 
 class TestFIXSessionSequenceNumbers:
