@@ -276,6 +276,7 @@ class FIXEngine:
         """
         while not self._stop_event.is_set():
             await self._session.check_heartbeat()
+            await self._session.check_heartbeat_send()
             if self._session.status == SessionStatus.ERROR:
                 await self._teardown_on_error()
                 return

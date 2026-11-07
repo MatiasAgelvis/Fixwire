@@ -476,6 +476,28 @@ class FIXSession:
         test_req.set(Tags.TEST_REQ_ID, test_req_id)
         await self.send(test_req)
 
+    async def check_heartbeat_send(self) -> None:
+        """Send a Heartbeat if nothing has gone out for a full interval.
+
+        Pure protocol decision — no timers. FIXEngine calls this on the
+        same task as ``check_heartbeat()``. ``last_sent_time`` is
+        maintained by ``send()``, so no extra state is needed.
+        """
+        if self.status != SessionStatus.LOGGED_ON:
+            return
+
+        idle = self._elapsed_seconds(self._state.last_sent_time, utc_now())
+
+        if idle < self.config.heartbeat_interval:
+            return
+
+        heartbeat = FIXMessageFactory.create_heartbeat(
+            sender=self.config.sender_comp_id,
+            target=self.config.target_comp_id,
+            seq=0,  # Will be set by send()
+        )
+        await self.send(heartbeat)
+
     def get_next_expected_seq_num(self) -> int:
         """Get next expected incoming sequence number."""
         return self._state.incoming_seq_num + 1
