@@ -653,7 +653,7 @@ class TestFIXEngineCoordination:
 class TestFIXEngineHeartbeat:
     """The heartbeat task: drive session checks and own ERROR teardown.
 
-    The session exposes check_heartbeat() as a pure decision but owns no
+    The session exposes check_peer_liveness() as a pure decision but owns no
     timers. The engine's heartbeat task supplies the tick, and is also the
     place that notices a session entering ERROR and tears the engine down.
     """

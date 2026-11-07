@@ -63,13 +63,13 @@ class TestFIXSessionPurity:
 
 
 class TestFIXSessionHeartbeatDecision:
-    """Test check_heartbeat() — the protocol decision behind heartbeat monitoring."""
+    """Test check_peer_liveness() — the protocol decision behind monitoring."""
 
     @pytest.mark.asyncio
     async def test_noop_when_not_logged_on(self, session):
-        """Test that check_heartbeat() does nothing unless logged on."""
+        """Test that check_peer_liveness() does nothing unless logged on."""
         # Act
-        await session.check_heartbeat()
+        await session.check_peer_liveness()
 
         # Assert
         assert session._send_queue.empty()
@@ -83,7 +83,7 @@ class TestFIXSessionHeartbeatDecision:
         session._state.last_received_time = utc_now()
 
         # Act
-        await session.check_heartbeat()
+        await session.check_peer_liveness()
 
         # Assert
         assert session._send_queue.empty()
@@ -103,7 +103,7 @@ class TestFIXSessionHeartbeatDecision:
         )
 
         # Act
-        await session.check_heartbeat()
+        await session.check_peer_liveness()
 
         # Assert
         assert session._send_queue.empty()
@@ -119,7 +119,7 @@ class TestFIXSessionHeartbeatDecision:
         )
 
         # Act
-        await session.check_heartbeat()
+        await session.check_peer_liveness()
 
         # Assert
         assert not session._send_queue.empty()
@@ -136,7 +136,7 @@ class TestFIXSessionHeartbeatDecision:
         )
 
         # Act
-        await session.check_heartbeat()
+        await session.check_peer_liveness()
 
         # Assert
         assert not session._send_queue.empty()
@@ -156,7 +156,7 @@ class TestFIXSessionHeartbeatDecision:
         )
 
         # Act
-        await session.check_heartbeat()
+        await session.check_peer_liveness()
 
         # Assert
         assert session.status == SessionStatus.ERROR
@@ -176,7 +176,7 @@ class TestFIXSessionHeartbeatDecision:
         )
 
         # Act
-        await session.check_heartbeat()
+        await session.check_peer_liveness()
 
         # Assert: Logout queued before the session parks in ERROR
         logout = session._send_queue.get_nowait()

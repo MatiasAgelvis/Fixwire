@@ -435,8 +435,12 @@ class FIXSession:
             return self.config.heartbeat_interval * 2
         return (now - since).total_seconds()
 
-    async def check_heartbeat(self) -> None:
-        """Run one heartbeat check: probe silent peers, escalate on timeout.
+    async def check_peer_liveness(self) -> None:
+        """Detect a silent peer and escalate if it stays silent.
+
+        Within the grace window this is a no-op. Beyond it, an unanswered
+        TestRequest terminates the session (Logout + ERROR); otherwise a
+        TestRequest is sent to probe the peer.
 
         Pure protocol decision — no timers. FIXEngine calls this on its
         heartbeat task on a fixed interval.
@@ -476,12 +480,12 @@ class FIXSession:
         test_req.set(Tags.TEST_REQ_ID, test_req_id)
         await self.send(test_req)
 
-    async def check_heartbeat_send(self) -> None:
-        """Send a Heartbeat if nothing has gone out for a full interval.
+    async def send_heartbeat_if_idle(self) -> None:
+        """Emit a Heartbeat when we have been quiet for a full interval.
 
-        Pure protocol decision — no timers. FIXEngine calls this on the
-        same task as ``check_heartbeat()``. ``last_sent_time`` is
-        maintained by ``send()``, so no extra state is needed.
+        This is the outbound keepalive half: it stops a strict peer from
+        timing us out. ``last_sent_time`` is maintained by ``send()``, so
+        no extra state is needed.
         """
         if self.status != SessionStatus.LOGGED_ON:
             return
