@@ -693,6 +693,32 @@ class TestFIXEngineHeartbeat:
         await engine.stop()
 
     @pytest.mark.asyncio
+    async def test_heartbeat_loop_sends_idle_heartbeat(
+        self, engine, session, transport
+    ):
+        """The engine's heartbeat task emits a Heartbeat when we are quiet."""
+        # Arrange
+        engine._heartbeat_poll = 0.01
+        session.status = SessionStatus.LOGGED_ON
+        # Peer is active, so only the send-side check should fire.
+        session._state.last_received_time = utc_now()
+        session._state.last_sent_time = utc_now() - timedelta(
+            seconds=session.config.heartbeat_interval * 2
+        )
+
+        # Act
+        await engine.start()
+        await _wait_until(
+            lambda: any(b"35=0" in d for d in transport.sent), timeout=1.0
+        )
+
+        # Assert
+        assert any(b"35=0" in d for d in transport.sent)
+
+        # Cleanup
+        await engine.stop()
+
+    @pytest.mark.asyncio
     async def test_tears_down_when_session_enters_error(
         self, engine, session, transport
     ):
