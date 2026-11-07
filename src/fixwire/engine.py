@@ -46,6 +46,7 @@ class FIXEngine:
         self._session = session
         self._transport = transport
         self._closed = False
+        self._logged_on = False
         self._writer_task: asyncio.Task[None] | None = None
         self._reader_task: asyncio.Task[None] | None = None
         self._heartbeat_task: asyncio.Task[None] | None = None
@@ -84,6 +85,7 @@ class FIXEngine:
                 self._wait_for_logon(),
                 timeout=self._session.config.logon_timeout,
             )
+            self._logged_on = True
         except TimeoutError as e:
             await self._teardown_after_failed_connect()
             raise TimeoutError(
@@ -212,21 +214,32 @@ class FIXEngine:
         except (TimeoutError, asyncio.CancelledError):
             task.cancel()
 
-    async def _teardown_on_error(self) -> None:
+    async def _drain_and_close(self) -> None:
         """Drain queued outbound, then close the transport.
 
         Called from the heartbeat task, so it must never await itself — it
         awaits the writer (a different task) to flush, then closes.
         """
-        logger.warning("engine.session_error",
-                       sender=self._session.config.sender_comp_id,
-                       target=self._session.config.target_comp_id)
         self._stop_event.set()
         await self._await_task(self._writer_task, timeout=1.0)
         try:
             await self._transport.close()
         except Exception:
             pass
+
+    async def _teardown_on_error(self) -> None:
+        """Announce the failure, then drain and close."""
+        logger.warning("engine.session_error",
+                       sender=self._session.config.sender_comp_id,
+                       target=self._session.config.target_comp_id)
+        await self._drain_and_close()
+
+    async def _teardown_on_logout(self) -> None:
+        """Announce the clean logout, then drain and close."""
+        logger.info("engine.logout_complete",
+                    sender=self._session.config.sender_comp_id,
+                    target=self._session.config.target_comp_id)
+        await self._drain_and_close()
 
     # --- Writer task ---
 
@@ -263,23 +276,39 @@ class FIXEngine:
             raise ConnectionError(f"transport.send failed: {e}") from e
 
     async def _heartbeat_loop(self) -> None:
-        """Drive session heartbeat checks and react to ERROR.
+        """Drive heartbeat checks and react to the session ending.
 
         The session owns the heartbeat *decision* but no timers; this task
-        supplies the tick. It also watches for a session that has entered
-        ERROR (for example a too-low sequence number) and tears the engine
-        down, since nothing else observes that transition once connected.
+        supplies the tick. It also watches for the session leaving
+        LOGGED_ON — ERROR (e.g. too-low sequence) or DISCONNECTED (peer
+        initiated Logout) — and tears the engine down, since nothing else
+        observes that transition once connected.
 
         Deliberately does not call ``stop()``: that would await this very
         task and deadlock. Setting ``_stop_event`` and closing the
         transport is enough — the sibling loops exit on their next poll.
         """
         while not self._stop_event.is_set():
+            if self._session.status == SessionStatus.LOGGED_ON:
+                self._logged_on = True
+
             await self._session.check_peer_liveness()
             await self._session.send_heartbeat_if_idle()
+
             if self._session.status == SessionStatus.ERROR:
                 await self._teardown_on_error()
                 return
+            # A peer-initiated Logout parks the session in DISCONNECTED.
+            # Only tear down if we had actually logged on, and not when an
+            # explicit disconnect() is already handling it.
+            if (
+                self._session.status == SessionStatus.DISCONNECTED
+                and self._logged_on
+                and not self._closed
+            ):
+                await self._teardown_on_logout()
+                return
+
             # Sleep until the next tick, but wake immediately on shutdown so
             # stop() is not delayed by a full poll interval.
             try:
