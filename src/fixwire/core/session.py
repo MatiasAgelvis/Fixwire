@@ -425,6 +425,16 @@ class FIXSession:
         )
         await self.send(logout)
 
+    def _elapsed_seconds(self, since: datetime | None, now: datetime) -> float:
+        """Seconds since ``since``; two intervals when never recorded.
+
+        A missing timestamp means "nothing seen/sent yet", which should
+        read as long overdue rather than as "just now".
+        """
+        if since is None:
+            return self.config.heartbeat_interval * 2
+        return (now - since).total_seconds()
+
     async def check_heartbeat(self) -> None:
         """Run one heartbeat check: probe silent peers, escalate on timeout.
 
@@ -434,12 +444,8 @@ class FIXSession:
         if self.status != SessionStatus.LOGGED_ON:
             return
 
-        # Check if we received anything recently
         now = utc_now()
-        if self._state.last_received_time:
-            time_since_last = (now - self._state.last_received_time).total_seconds()
-        else:
-            time_since_last = self.config.heartbeat_interval * 2
+        time_since_last = self._elapsed_seconds(self._state.last_received_time, now)
 
         # FIX 4.4 allows ~120% of the interval before probing a silent peer.
         grace = self.config.heartbeat_interval * 1.2
