@@ -23,7 +23,7 @@ logger = structlog.get_logger()
 # large enough not to burn CPU in idle sessions.
 _IDLE_POLL = 0.05
 
-# How often the heartbeat task wakes. It drives session.check_heartbeat()
+# How often the heartbeat task wakes. It drives session.check_peer_liveness()
 # (which decides internally whether anything is due) and also notices a
 # session that has entered ERROR. Bounds both heartbeat responsiveness and
 # ERROR teardown latency.
@@ -275,7 +275,8 @@ class FIXEngine:
         transport is enough — the sibling loops exit on their next poll.
         """
         while not self._stop_event.is_set():
-            await self._session.check_heartbeat()
+            await self._session.check_peer_liveness()
+            await self._session.send_heartbeat_if_idle()
             if self._session.status == SessionStatus.ERROR:
                 await self._teardown_on_error()
                 return

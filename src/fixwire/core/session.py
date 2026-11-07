@@ -425,8 +425,22 @@ class FIXSession:
         )
         await self.send(logout)
 
-    async def check_heartbeat(self) -> None:
-        """Run one heartbeat check: probe silent peers, escalate on timeout.
+    def _elapsed_seconds(self, since: datetime | None, now: datetime) -> float:
+        """Seconds since ``since``; two intervals when never recorded.
+
+        A missing timestamp means "nothing seen/sent yet", which should
+        read as long overdue rather than as "just now".
+        """
+        if since is None:
+            return self.config.heartbeat_interval * 2
+        return (now - since).total_seconds()
+
+    async def check_peer_liveness(self) -> None:
+        """Detect a silent peer and escalate if it stays silent.
+
+        Within the grace window this is a no-op. Beyond it, an unanswered
+        TestRequest terminates the session (Logout + ERROR); otherwise a
+        TestRequest is sent to probe the peer.
 
         Pure protocol decision — no timers. FIXEngine calls this on its
         heartbeat task on a fixed interval.
@@ -434,12 +448,8 @@ class FIXSession:
         if self.status != SessionStatus.LOGGED_ON:
             return
 
-        # Check if we received anything recently
         now = utc_now()
-        if self._state.last_received_time:
-            time_since_last = (now - self._state.last_received_time).total_seconds()
-        else:
-            time_since_last = self.config.heartbeat_interval * 2
+        time_since_last = self._elapsed_seconds(self._state.last_received_time, now)
 
         # FIX 4.4 allows ~120% of the interval before probing a silent peer.
         grace = self.config.heartbeat_interval * 1.2
@@ -469,6 +479,28 @@ class FIXSession:
         test_req.msg_type = MsgType.TEST_REQUEST
         test_req.set(Tags.TEST_REQ_ID, test_req_id)
         await self.send(test_req)
+
+    async def send_heartbeat_if_idle(self) -> None:
+        """Emit a Heartbeat when we have been quiet for a full interval.
+
+        This is the outbound keepalive half: it stops a strict peer from
+        timing us out. ``last_sent_time`` is maintained by ``send()``, so
+        no extra state is needed.
+        """
+        if self.status != SessionStatus.LOGGED_ON:
+            return
+
+        idle = self._elapsed_seconds(self._state.last_sent_time, utc_now())
+
+        if idle < self.config.heartbeat_interval:
+            return
+
+        heartbeat = FIXMessageFactory.create_heartbeat(
+            sender=self.config.sender_comp_id,
+            target=self.config.target_comp_id,
+            seq=0,  # Will be set by send()
+        )
+        await self.send(heartbeat)
 
     def get_next_expected_seq_num(self) -> int:
         """Get next expected incoming sequence number."""

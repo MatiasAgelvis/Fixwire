@@ -63,13 +63,13 @@ class TestFIXSessionPurity:
 
 
 class TestFIXSessionHeartbeatDecision:
-    """Test check_heartbeat() — the protocol decision behind heartbeat monitoring."""
+    """Test check_peer_liveness() — the protocol decision behind monitoring."""
 
     @pytest.mark.asyncio
     async def test_noop_when_not_logged_on(self, session):
-        """Test that check_heartbeat() does nothing unless logged on."""
+        """Test that check_peer_liveness() does nothing unless logged on."""
         # Act
-        await session.check_heartbeat()
+        await session.check_peer_liveness()
 
         # Assert
         assert session._send_queue.empty()
@@ -83,7 +83,7 @@ class TestFIXSessionHeartbeatDecision:
         session._state.last_received_time = utc_now()
 
         # Act
-        await session.check_heartbeat()
+        await session.check_peer_liveness()
 
         # Assert
         assert session._send_queue.empty()
@@ -103,7 +103,7 @@ class TestFIXSessionHeartbeatDecision:
         )
 
         # Act
-        await session.check_heartbeat()
+        await session.check_peer_liveness()
 
         # Assert
         assert session._send_queue.empty()
@@ -119,7 +119,7 @@ class TestFIXSessionHeartbeatDecision:
         )
 
         # Act
-        await session.check_heartbeat()
+        await session.check_peer_liveness()
 
         # Assert
         assert not session._send_queue.empty()
@@ -136,7 +136,7 @@ class TestFIXSessionHeartbeatDecision:
         )
 
         # Act
-        await session.check_heartbeat()
+        await session.check_peer_liveness()
 
         # Assert
         assert not session._send_queue.empty()
@@ -156,7 +156,7 @@ class TestFIXSessionHeartbeatDecision:
         )
 
         # Act
-        await session.check_heartbeat()
+        await session.check_peer_liveness()
 
         # Assert
         assert session.status == SessionStatus.ERROR
@@ -176,12 +176,82 @@ class TestFIXSessionHeartbeatDecision:
         )
 
         # Act
-        await session.check_heartbeat()
+        await session.check_peer_liveness()
 
         # Assert: Logout queued before the session parks in ERROR
         logout = session._send_queue.get_nowait()
         assert logout[35] == MsgType.LOGOUT
         assert session.status == SessionStatus.ERROR
+
+
+class TestFIXSessionHeartbeatSend:
+    """Outbound heartbeats: send one when we have been quiet.
+
+    FIX 4.4 expects each side to send a Heartbeat if nothing has gone out
+    within HeartBtInt. Without this we only stay alive because the peer
+    probes us.
+    """
+
+    @pytest.mark.asyncio
+    async def test_sends_heartbeat_when_idle(self, session):
+        """No outbound traffic for a full interval produces a Heartbeat."""
+        # Arrange
+        session.status = SessionStatus.LOGGED_ON
+        session._state.last_sent_time = utc_now() - timedelta(
+            seconds=session.config.heartbeat_interval * 2
+        )
+
+        # Act
+        await session.send_heartbeat_if_idle()
+
+        # Assert
+        assert not session._send_queue.empty()
+        msg = session._send_queue.get_nowait()
+        assert msg[35] == MsgType.HEARTBEAT
+
+    @pytest.mark.asyncio
+    async def test_no_heartbeat_when_recently_active(self, session):
+        """Recent outbound traffic suppresses the idle Heartbeat."""
+        # Arrange
+        session.status = SessionStatus.LOGGED_ON
+        session._state.last_sent_time = utc_now()
+
+        # Act
+        await session.send_heartbeat_if_idle()
+
+        # Assert
+        assert session._send_queue.empty()
+
+    @pytest.mark.asyncio
+    async def test_no_heartbeat_when_not_logged_on(self, session):
+        """Nothing is sent before the session is established."""
+        # Arrange: DISCONNECTED, last_sent long ago
+        session._state.last_sent_time = utc_now() - timedelta(
+            seconds=session.config.heartbeat_interval * 2
+        )
+
+        # Act
+        await session.send_heartbeat_if_idle()
+
+        # Assert
+        assert session._send_queue.empty()
+
+    @pytest.mark.asyncio
+    async def test_heartbeat_refreshes_last_sent_time(self, session):
+        """Sending the Heartbeat updates last_sent_time via send()."""
+        # Arrange
+        session.status = SessionStatus.LOGGED_ON
+        session._state.last_sent_time = utc_now() - timedelta(
+            seconds=session.config.heartbeat_interval * 2
+        )
+
+        # Act
+        await session.send_heartbeat_if_idle()
+
+        # Assert
+        assert session._state.last_sent_time is not None
+        idle = (utc_now() - session._state.last_sent_time).total_seconds()
+        assert idle < 1.0
 
 
 class TestFIXSessionSequenceNumbers:
