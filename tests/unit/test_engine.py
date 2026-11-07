@@ -844,6 +844,42 @@ class TestFIXEngineTeardown:
         assert engine._writer_task is None
         assert engine._heartbeat_task is None
 
+    @pytest.mark.asyncio
+    async def test_peer_initiated_logout_tears_down_engine(
+        self, engine, session, transport
+    ):
+        """A Logout from the peer must close the engine, not leave it running.
+
+        Otherwise the session is DISCONNECTED but the tasks and transport
+        stay alive until someone calls disconnect() by hand.
+        """
+        # Arrange
+        engine._heartbeat_poll = 0.01
+        session.status = SessionStatus.LOGGED_ON
+        await engine.start()
+
+        # Act: the peer initiates logout
+        peer_logout = FIXMessageFactory.create_logout(
+            "SERVER", "CLIENT", seq=1
+        )
+        transport.feed(peer_logout.serialize())
+        await _wait_until(lambda: transport.is_connected is False, timeout=2.0)
+
+        # Assert: session parked, transport closed, no task left running
+        assert session.status == SessionStatus.DISCONNECTED
+        assert transport.is_connected is False
+        await _wait_until(
+            lambda: all(
+                t is None or t.done()
+                for t in (
+                    engine._writer_task,
+                    engine._reader_task,
+                    engine._heartbeat_task,
+                )
+            ),
+            timeout=1.0,
+        )
+
 
 async def _drain_writer(engine: FIXEngine, timeout: float = 2.0) -> None:
     """Wait until the session queue is empty and the writer has had a
