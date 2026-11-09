@@ -1,7 +1,7 @@
-"""End-to-end integration test for FIXEngine.
+"""End-to-end integration test for FIXSessionRunner.
 
-M1 deliverable: two FIXEngine instances over a real WebSocket exchange
-Logon → Heartbeat → Logout. This is the proof that the engine wiring
+M1 deliverable: two FIXSessionRunner instances over a real WebSocket exchange
+Logon → Heartbeat → Logout. This is the proof that the runner wiring
 (transport, reader, writer, session handshake) actually works in concert.
 
 This test is intentionally in tests/integration/ rather than tests/unit/:
@@ -19,7 +19,7 @@ import pytest
 
 from fixwire.core.factory import FIXMessageFactory
 from fixwire.core.session import FIXSession, SessionConfig, SessionStatus
-from fixwire.engine import FIXEngine
+from fixwire.runner import FIXSessionRunner
 from fixwire.transport.websocket import (
     WebSocketServer,
     WebSocketTransport,
@@ -53,18 +53,18 @@ async def ws_server():
 
 
 @pytest.mark.asyncio
-async def test_two_engines_exchange_logon_heartbeat_logout_over_websocket(
+async def test_two_runners_exchange_logon_heartbeat_logout_over_websocket(
     ws_server,
 ):
-    """M1 happy-path integration: two FIXEngines connect, handshake Logon,
+    """M1 happy-path integration: two FIXSessionRunners connect, handshake Logon,
     exchange a Heartbeat, and Logout cleanly."""
     server, port = ws_server
     url = f"ws://127.0.0.1:{port}"
 
-    # --- Server side: the connection handler owns the server FIXEngine ---
+    # --- Server side: the connection handler owns the server FIXSessionRunner ---
     server_logged_on = asyncio.Event()
     shutdown_server = asyncio.Event()
-    server_engine_holder: dict[str, FIXEngine] = {}
+    server_runner_holder: dict[str, FIXSessionRunner] = {}
 
     async def handle_connection(ws):
         adapter = WebSocketTransportAdapter(ws)
@@ -72,20 +72,20 @@ async def test_two_engines_exchange_logon_heartbeat_logout_over_websocket(
             sender_comp_id="SERVER", target_comp_id="CLIENT"
         )
         server_session = FIXSession(server_config)
-        server_engine = FIXEngine(server_session, adapter)
-        server_engine_holder["engine"] = server_engine
+        server_runner = FIXSessionRunner(server_session, adapter)
+        server_runner_holder["runner"] = server_runner
 
         try:
             # Drive the server-side handshake. The client's Logon is
             # already in flight; this returns when the server reaches
             # LOGGED_ON.
-            await server_engine.connect()
+            await server_runner.connect()
             server_logged_on.set()
 
             # Park until the test signals shutdown.
             await shutdown_server.wait()
         finally:
-            await server_engine.disconnect()
+            await server_runner.disconnect()
 
     server.on_connection(handle_connection)
 
@@ -95,16 +95,16 @@ async def test_two_engines_exchange_logon_heartbeat_logout_over_websocket(
     )
     client_session = FIXSession(client_config)
     client_transport = WebSocketTransport(url)
-    client_engine = FIXEngine(client_session, client_transport)
+    client_runner = FIXSessionRunner(client_session, client_transport)
 
     # Act: client connect triggers the server handler
-    await client_engine.connect()
+    await client_runner.connect()
     await asyncio.wait_for(server_logged_on.wait(), timeout=2.0)
-    server_engine = server_engine_holder["engine"]
+    server_runner = server_runner_holder["runner"]
 
-    # Assert: both engines are logged on
+    # Assert: both runners are logged on
     assert client_session.status == SessionStatus.LOGGED_ON
-    assert server_engine.session.status == SessionStatus.LOGGED_ON
+    assert server_runner.session.status == SessionStatus.LOGGED_ON
 
     # Exchange a Heartbeat: client sends, server reader picks it up
     hb = FIXMessageFactory.create_heartbeat("CLIENT", "SERVER", 0)
@@ -115,11 +115,11 @@ async def test_two_engines_exchange_logon_heartbeat_logout_over_websocket(
     # Drive the server-side shutdown, then the client-side
     shutdown_server.set()
     try:
-        await asyncio.wait_for(server_engine.disconnect(), timeout=2.0)
+        await asyncio.wait_for(server_runner.disconnect(), timeout=2.0)
     except TimeoutError:
         pass
-    await client_engine.disconnect()
+    await client_runner.disconnect()
 
     # Final assertions: both ended DISCONNECTED
     assert client_session.status == SessionStatus.DISCONNECTED
-    assert server_engine.session.status == SessionStatus.DISCONNECTED
+    assert server_runner.session.status == SessionStatus.DISCONNECTED

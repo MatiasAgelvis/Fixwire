@@ -42,7 +42,7 @@ graph TD
         A["App code"]
     end
 
-    subgraph Engine["FIXEngine (NEW — middle layer)"]
+    subgraph Runner["FIXSessionRunner (NEW — middle layer)"]
         E1["Lifecycle orchestrator"]
         E2["Writer task (outbound drain)"]
         E3["Reader task (inbound drain)"]
@@ -64,9 +64,9 @@ graph TD
         T3["WebSocketTransportAdapter"]
     end
 
-    A -->|"engine.connect() / session.send(msg)"| Engine
-    Engine --> Session
-    Engine --> Transport
+    A -->|"runner.connect() / session.send(msg)"| Runner
+    Runner --> Session
+    Runner --> Transport
     Transport -->|"bytes"| Socket["Wire"]
 ```
 
@@ -76,9 +76,9 @@ graph TD
 |---|---|---|
 | **Transport** | Sockets, frames, bytes | FIX semantics, seq numbers, sessions |
 | **FIXSession** (refactored) | FIX messages, seq numbers, logon/heartbeat, callbacks | Sockets, bytes, asyncio tasks, transport |
-| **FIXEngine** (new) | Transport, session, asyncio tasks, queue, lifecycle | FIX message semantics, internal handler details |
+| **FIXSessionRunner** (new) | Transport, session, asyncio tasks, queue, lifecycle | FIX message semantics, internal handler details |
 
-The protocol layer never imports `asyncio` for I/O scheduling; it uses `asyncio.Queue` for queueing because that's the only async-aware primitive it needs (and it's ergonomic to keep). Tasks live in `FIXEngine`.
+The protocol layer never imports `asyncio` for I/O scheduling; it uses `asyncio.Queue` for queueing because that's the only async-aware primitive it needs (and it's ergonomic to keep). Tasks live in `FIXSessionRunner`.
 
 ---
 
@@ -86,66 +86,66 @@ The protocol layer never imports `asyncio` for I/O scheduling; it uses `asyncio.
 
 These are the decisions we committed to after working through the alternatives. Each is preserved here so future contributors do not relitigate them.
 
-### Decision 1 — Transport ownership: the engine owns the connection lifecycle
+### Decision 1 — Transport ownership: the runner owns the connection lifecycle
 
-**Choice:** `FIXEngine(session, transport)` receives an *unconnected* `Transport`. `engine.connect()` calls `await transport.connect()` as its first step, so the engine owns the full open → logon → running lifecycle.
+**Choice:** `FIXSessionRunner(session, transport)` receives an *unconnected* `Transport`. `runner.connect()` calls `await transport.connect()` as its first step, so the runner owns the full open → logon → running lifecycle.
 
 > **Revised after implementation.** This ADR originally recorded "the caller connects the transport first." That was changed during M1 because it does not survive contact with the server side.
 
 | Considered | Choice | Reason |
 |---|---|---|
-| A. Engine builds from URL | ❌ | Couples `FIXEngine` to URL semantics; harder to inject a fake for tests |
-| B. Caller connects, engine adopts | ❌ | See below — forces the caller to know which side it's on |
-| **C. Engine owns `connect()`** | ✅ | Uniform lifecycle; server-side adapters have nothing to dial |
+| A. Runner builds from URL | ❌ | Couples `FIXSessionRunner` to URL semantics; harder to inject a fake for tests |
+| B. Caller connects, runner adopts | ❌ | See below — forces the caller to know which side it's on |
+| **C. Runner owns `connect()`** | ✅ | Uniform lifecycle; server-side adapters have nothing to dial |
 | D. Both paths | ❌ for now | Two code paths to maintain; can revisit if a real convenience emerges |
 
-**Why the original choice (B) was wrong.** `WebSocketTransport` (client) must be dialed before use. `WebSocketTransportAdapter` (server) is handed an *already-accepted* `ServerConnection` — there is nothing to dial. Under "caller connects," every server handler would have to call a no-op `connect()` before constructing the engine, and the engine could not tell which kind it was holding. Putting `connect()` on the `Transport` protocol makes both cases a single uniform call; the server-side implementation is a documented no-op.
+**Why the original choice (B) was wrong.** `WebSocketTransport` (client) must be dialed before use. `WebSocketTransportAdapter` (server) is handed an *already-accepted* `ServerConnection` — there is nothing to dial. Under "caller connects," every server handler would have to call a no-op `connect()` before constructing the runner, and the runner could not tell which kind it was holding. Putting `connect()` on the `Transport` protocol makes both cases a single uniform call; the server-side implementation is a documented no-op.
 
 The `Transport` protocol therefore gained a `connect()` method, implemented as:
 - `WebSocketTransport.connect()` — dials the URL (already existed).
 - `InMemoryTransport.connect()` — no-op; asserts the always-connected invariant.
 - `WebSocketTransportAdapter.connect()` — no-op; the connection is open by construction.
 
-**Consequence:** `FIXSession` still never touches a transport. The engine is the only layer that knows one exists.
+**Consequence:** `FIXSession` still never touches a transport. The runner is the only layer that knows one exists.
 
 ### Decision 2 — Outbound model: writer task drains the queue
 
-**Choice:** `FIXSession.send(msg)` queues the message; `FIXEngine` runs a writer task that dequeues, serializes, and `transport.send`s.
+**Choice:** `FIXSession.send(msg)` queues the message; `FIXSessionRunner` runs a writer task that dequeues, serializes, and `transport.send`s.
 
 **Why not inline send:** the existing `tests/unit/core/test_session.py` pins the queue inside `FIXSession` via `session._send_queue.get_nowait()`. Removing it breaks tests; keeping it gives visible backpressure and a natural test affordance.
 
 ### Decision 3 — Inbound model: push with task guards
 
-**Choice:** `FIXEngine` runs a reader task that loops `await transport.receive()` → `session.receive(bytes)`. The reader wraps the loop body in a task guard (`_handle_task_error`) that catches `Exception` (re-raises `CancelledError`), logs, and sets `session.status = ERROR`. Outbound, `_safe_send()` normalises any transport failure into `ConnectionError`.
+**Choice:** `FIXSessionRunner` runs a reader task that loops `await transport.receive()` → `session.receive(bytes)`. The reader wraps the loop body in a task guard (`_handle_task_error`) that catches `Exception` (re-raises `CancelledError`), logs, and sets `session.status = ERROR`. Outbound, `_safe_send()` normalises any transport failure into `ConnectionError`.
 
 > **Revised after implementation.** This originally described a `_safe_*` pattern on both loops. Only the send side kept that name; the receive side uses the shared `_handle_task_error()` guard, because both failures need the same outcome (log → `ERROR` → signal shutdown) and one guard is easier to reason about than two near-identical wrappers. See Decision 6 for why that guard must not await the failing task.
 
 **Why not pull-only:** `receive()` would only fire when the caller asks, breaking the real-time semantics of FIX and forcing every consumer to implement their own polling loop.
 
-**Why not bounded inbound queue at v1:** considered. The deciding constraint is FIX's absolute integrity invariant — **messages are never dropped** — so a full bounded queue can only block the reader (which is push with a larger buffer) or fail the session. Either way the queue is a latency shock absorber and a policy point, not a correctness mechanism; backpressure ultimately lands at the socket, where TCP slows the peer and no message is ever lost or reordered. Decision lands on **push with task guards** for M1 to keep the diff small while the engine itself is being invented. **The bounded inbound queue is a scheduled M3 deliverable** (queue-full policy: block with timeout → `ERROR`, never drop) — see the roadmap below.
+**Why not bounded inbound queue at v1:** considered. The deciding constraint is FIX's absolute integrity invariant — **messages are never dropped** — so a full bounded queue can only block the reader (which is push with a larger buffer) or fail the session. Either way the queue is a latency shock absorber and a policy point, not a correctness mechanism; backpressure ultimately lands at the socket, where TCP slows the peer and no message is ever lost or reordered. Decision lands on **push with task guards** for M1 to keep the diff small while the runner itself is being invented. **The bounded inbound queue is a scheduled M3 deliverable** (queue-full policy: block with timeout → `ERROR`, never drop) — see the roadmap below.
 
 ### Decision 4 — Error handling: strict by default; retries configurable later
 
 **Choice:**
 
 - Any uncaught exception in a reader/writer task → log → `session.status = ERROR` → signal sibling tasks via `_stop_event` → close transport.
-- Foreground awaits (`session.send`, `engine.disconnect`) re-raise the relevant `ConnectionError` so the caller can react.
+- Foreground awaits (`session.send`, `runner.disconnect`) re-raise the relevant `ConnectionError` so the caller can react.
 - Strict mode is on by default (M2 will codify this; today it is the parser's default).
-- Retries with exponential backoff are deferred to M3. The signature is reserved: `engine.reconnect()` exists as a stub but does nothing until M3.
+- Retries with exponential backoff are deferred to M3. The signature is reserved: `FIXSessionRunner.reconnect()` exists as a stub but does nothing until M3.
 
-### Decision 5 — The engine owns time; the session owns state
+### Decision 5 — The runner owns time; the session owns state
 
-**Choice:** `FIXSession` transitions state and never waits. Both handshake deadlines live in `FIXEngine`.
+**Choice:** `FIXSession` transitions state and never waits. Both handshake deadlines live in `FIXSessionRunner`.
 
 | Concern | Owner | Where |
 |---|---|---|
 | Transition to `WAITING_LOGON` / `WAITING_LOGOUT` | Session | `session.connect()` / `session.disconnect()` |
-| Wait for the peer's reply | Engine | `_wait_for_logon()` / `_await_logout()` |
-| Apply `logon_timeout` / `logout_timeout` | Engine | `engine.connect()` / `engine.disconnect()` |
+| Wait for the peer's reply | Runner | `_wait_for_logon()` / `_await_logout()` |
+| Apply `logon_timeout` / `logout_timeout` | Runner | `runner.connect()` / `runner.disconnect()` |
 
-**Why:** `MILESTONES.md` defines M1's bar as a *pure protocol state machine* — "no asyncio tasks, no transport references, no I/O concerns." A session that blocks on a reply owns a deadline, and a deadline is coordination, not protocol. Keeping waits in the engine leaves the session's entire asyncio surface down to two passive uses: the outbound `asyncio.Queue`, and an `asyncio.iscoroutine()` duck-type check on app callbacks.
+**Why:** `MILESTONES.md` defines M1's bar as a *pure protocol state machine* — "no asyncio tasks, no transport references, no I/O concerns." A session that blocks on a reply owns a deadline, and a deadline is coordination, not protocol. Keeping waits in the runner leaves the session's entire asyncio surface down to two passive uses: the outbound `asyncio.Queue`, and an `asyncio.iscoroutine()` duck-type check on app callbacks.
 
-The same rule pays forward: M2's heartbeat/TestRequest timing has the identical shape (the session decides *what* is late, the engine decides *when* to act), so one rule covers it.
+The same rule pays forward: M2's heartbeat/TestRequest timing has the identical shape (the session decides *what* is late, the runner decides *when* to act), so one rule covers it.
 
 **Trade-off, accepted:** a `FIXSession` used standalone can no longer complete a handshake on its own — `disconnect()` parks in `WAITING_LOGOUT` and returns. Callers driving the session directly own the wait. This is deliberate: it is what makes level-A unit testing of the protocol layer possible without an event loop or a transport.
 
@@ -174,12 +174,12 @@ The choice of names reduces the ambiguity that bit us earlier:
 | Concept | Name in code | Why |
 |---|---|---|
 | FIX protocol state machine | `FIXSession` | Already used; matches FIX spec terminology |
-| Connection-level coordination | `FIXEngine` | Familiar in FIX community; "engine holds a session + transport" |
+| Connection-level coordination | `FIXSessionRunner` | Familiar in FIX community; "runner holds a session + transport" |
 | Raw bytes I/O | `Transport` | Generic; the `Transport` Protocol enables TCP / WS / file / etc. |
-| One FIX peer-to-peer relationship | "session" in conversation | When in doubt, talk about the *FIX session* (FIXSession) or the *engine* (FIXEngine) explicitly |
+| One FIX peer-to-peer relationship | "session" in conversation | When in doubt, talk about the *FIX session* (FIXSession) or the *runner* (FIXSessionRunner) explicitly |
 
 When something is **session-shaped** (logon, sequence, handlers), it belongs on `FIXSession`.
-When something is **I/O-shaped** (tasks, queue, transport lifecycle), it belongs on `FIXEngine`.
+When something is **I/O-shaped** (tasks, queue, transport lifecycle), it belongs on `FIXSessionRunner`.
 
 ---
 
@@ -212,22 +212,22 @@ class FIXSession:
     def get_next_send_seq_num(self) -> int: ...
     def get_next_expected_seq_num(self) -> int: ...
 
-    # --- Lifecycle hooks (used by FIXEngine, not normally called directly) ---
+    # --- Lifecycle hooks (used by FIXSessionRunner, not normally called directly) ---
     async def connect(self) -> None: ...
     async def disconnect(self) -> None: ...
 ```
 
 **Removed after refactor:**
 
-- `_send_queue` *stays* (tests depend on it; the engine drains it).
-- `_heartbeat_task` *moves* to `FIXEngine`.
+- `_send_queue` *stays* (tests depend on it; the runner drains it).
+- `_heartbeat_task` *moves* to `FIXSessionRunner`.
 - `_connect_task` *removed* (was unused).
-- `_receive_callbacks` *stays* (used by engine's reader task path).
+- `_receive_callbacks` *stays* (used by runner's reader task path).
 
-### 5.2 `FIXEngine` (new)
+### 5.2 `FIXSessionRunner` (new)
 
 ```python
-class FIXEngine:
+class FIXSessionRunner:
     """Coordinates a FIXSession with a Transport.
 
     Owns the asyncio tasks that move bytes in and out. Strict error handling:
@@ -278,12 +278,12 @@ Already defined in `src/fixwire/transport/__init__.py` as a `Protocol`. No chang
 ```mermaid
 sequenceDiagram
     participant App
-    participant Eng as FIXEngine
+    participant Eng as FIXSessionRunner
     participant S as FIXSession
     participant T as Transport
     participant R as Remote
 
-    App->>Eng: await engine.connect()
+    App->>Eng: await runner.connect()
     Eng->>T: await transport.connect()
     Note over T: no-op for server-side adapters (Decision 1)
     Eng->>Eng: spawn _writer_task
@@ -334,15 +334,15 @@ sequenceDiagram
 ```mermaid
 sequenceDiagram
     participant App
-    participant Eng as FIXEngine
+    participant Eng as FIXSessionRunner
     participant S as FIXSession
     participant T as Transport
     participant R as Remote
 
-    App->>Eng: await engine.disconnect()
+    App->>Eng: await runner.disconnect()
     Eng->>S: await session.disconnect()
     S->>S: status = WAITING_LOGOUT, send logout, return
-    Note over S: no wait — the engine owns the timeout (Decision 5)
+    Note over S: no wait — the runner owns the timeout (Decision 5)
     Eng->>Eng: await _await_logout() bounded by logout_timeout
     S-->>Eng: status = DISCONNECTED (on response)
     Eng->>Eng: cancel _reader_task, _writer_task
@@ -363,19 +363,19 @@ sequenceDiagram
     RT->>RT: except (cancel sibling task: WT.cancel())
     RT->>S: session.status = ERROR
     RT->>T: await transport.close()
-    Note over RT: task ends; engine surfaces ERROR status to caller
+    Note over RT: task ends; runner surfaces ERROR status to caller
 ```
 
 ---
 
 ## 7. Lifecycle State Machine
 
-(Owned by `FIXSession`, surfaced through `FIXEngine.status`.)
+(Owned by `FIXSession`, surfaced through `FIXSessionRunner.status`.)
 
 ```mermaid
 stateDiagram-v2
     [*] --> DISCONNECTED
-    DISCONNECTED --> CONNECTING: engine.connect()
+    DISCONNECTED --> CONNECTING: runner.connect()
     CONNECTING --> WAITING_LOGON: logon queued
     WAITING_LOGON --> LOGGED_ON: logon response received
     WAITING_LOGON --> ERROR: logon timeout / reject
@@ -383,11 +383,11 @@ stateDiagram-v2
     WAITING_LOGOUT --> DISCONNECTED: logout response received
     WAITING_LOGOUT --> ERROR: logout timeout
     LOGGED_ON --> ERROR: heartbeat / seq / unhandled task exception
-    ERROR --> DISCONNECTED: engine.disconnect()
+    ERROR --> DISCONNECTED: runner.disconnect()
     DISCONNECTED --> [*]
 ```
 
-State transitions remain in `FIXSession`; `FIXEngine` only reads `session.status` and drives transitions via `session.connect()` / `session.disconnect()`.
+State transitions remain in `FIXSession`; `FIXSessionRunner` only reads `session.status` and drives transitions via `session.connect()` / `session.disconnect()`.
 
 ---
 
@@ -395,16 +395,16 @@ State transitions remain in `FIXSession`; `FIXEngine` only reads `session.status
 
 | Source | Where it surfaces | Strict mode action | Non-strict action | Session status |
 |---|---|---|---|---|
-| Transport connect refused | `engine.connect()` raises `ConnectionError` | n/a | n/a | stays `DISCONNECTED` |
+| Transport connect refused | `runner.connect()` raises `ConnectionError` | n/a | n/a | stays `DISCONNECTED` |
 | Transport dropped mid-session | Reader task catches | Log, set `ERROR`, signal siblings via `_stop_event`, close transport | Same | `ERROR` |
 | `FIXParseError` (bad checksum, malformed) | Inside `session.receive` | Raise → reader task catches → `ERROR` | Log + drop message | unchanged (non-strict) or `ERROR` (strict) |
 | Sequence mismatch (M2) | Inside `session.receive` | Logout | Reject + continue (M2 fix) | unchanged or `ERROR` |
-| Heartbeat timeout | `FIXEngine` heartbeat task | Logout (M2) | Same | `ERROR` |
-| TestRequest timeout | `FIXEngine` heartbeat task | Disconnect (M2) | Same | `ERROR` |
-| Logon timeout | `engine.connect()` awaits `_wait_for_logon()` | Raise `TimeoutError` | Same | `ERROR` |
-| Logout timeout | `engine.disconnect()` awaits `_await_logout()` | Force `DISCONNECTED` | Same | `DISCONNECTED` |
+| Heartbeat timeout | `FIXSessionRunner` heartbeat task | Logout (M2) | Same | `ERROR` |
+| TestRequest timeout | `FIXSessionRunner` heartbeat task | Disconnect (M2) | Same | `ERROR` |
+| Logon timeout | `runner.connect()` awaits `_wait_for_logon()` | Raise `TimeoutError` | Same | `ERROR` |
+| Logout timeout | `runner.disconnect()` awaits `_await_logout()` | Force `DISCONNECTED` | Same | `DISCONNECTED` |
 | Unhandled exception in task | Reader/Writer `_handle_task_error()` guard | Log, set `ERROR`, signal shutdown | Same | `ERROR` |
-| Caller-initiated `engine.disconnect()` while running | Engine | Cancel tasks, close transport | Same | `DISCONNECTED` |
+| Caller-initiated `runner.disconnect()` while running | Runner | Cancel tasks, close transport | Same | `DISCONNECTED` |
 
 The error matrix is enforced by tests: every row above maps to one or more named tests in M1 and M2.
 
@@ -417,11 +417,11 @@ The error matrix is enforced by tests: every row above maps to one or more named
 | # | Slice | Tests added |
 |---|---|---|
 | 1 | Refactor `FIXSession` to be transport-agnostic. No behavior change. | Existing `test_session.py` keeps passing. New negative tests: `FIXSession` constructor doesn't import or accept a `Transport`. |
-| 2 | Add `FIXEngine` skeleton: constructor, `disconnect()` (no I/O yet), `status` / `is_connected` delegation. | Unit tests for `FIXEngine` over `InMemoryTransport`. |
+| 2 | Add `FIXSessionRunner` skeleton: constructor, `disconnect()` (no I/O yet), `status` / `is_connected` delegation. | Unit tests for `FIXSessionRunner` over `InMemoryTransport`. |
 | 3 | Writer task: drain `_send_queue`, serialize, `transport.send`. | Tests over `InMemoryTransport`; deterministic, socket-free. |
 | 4 | Reader task: `transport.receive()` → `session.receive(bytes)`; `_handle_task_error` guard. | `InMemoryTransport.feed()` injects inbound bytes. Test where `receive()` raises to verify `ERROR` is set. |
-| 5 | Lifecycle: `engine.connect()` orchestrates everything. `engine.disconnect()` cancels + closes. | Unit tests over `InMemoryTransport`. **`assertLogged` for state transitions.** |
-| 6 | Real WebSocket integration test (one happy path): two sessions over `WebSocketServer` complete a Logon → Heartbeat → Logout. | New file `tests/integration/test_engine_e2e.py`. Requires a free port — sandbox cannot bind; user's machine can. |
+| 5 | Lifecycle: `runner.connect()` orchestrates everything. `runner.disconnect()` cancels + closes. | Unit tests over `InMemoryTransport`. **`assertLogged` for state transitions.** |
+| 6 | Real WebSocket integration test (one happy path): two sessions over `WebSocketServer` complete a Logon → Heartbeat → Logout. | New file `tests/integration/test_runner_e2e.py`. Requires a free port — sandbox cannot bind; user's machine can. |
 
 Each slice is its own commit on `feature/session-transport-integration`. CI must be green at each merge point.
 
@@ -439,7 +439,7 @@ These are intentionally **out of scope for M1** but documented so M2+ contributo
 - `datetime.utcnow()` → `datetime.now(UTC)` migration.
 
 ### M3 — Resilience (reconnect, persistence, audit)
-- `FIXEngine.reconnect()` with exponential backoff.
+- `FIXSessionRunner.reconnect()` with exponential backoff.
 - `SequenceStore` protocol; `FileSequenceStore` default.
 - Bounded inbound queue — scheduled deliverable. Queue-full policy: block with timeout → `ERROR`, never drop.
 - App callback isolation: `on_message` must never block protocol handling (heartbeat/TestRequest responses); hand off to its own task.
@@ -464,4 +464,4 @@ These are intentionally **out of scope for M1** but documented so M2+ contributo
 
 ## 11. Why This Shape, In One Paragraph
 
-`FIXSession` does what FIX engines have always done: it tracks the protocol state machine. Removing I/O from it makes the protocol provable in isolation, which is what banking customers will demand. The cost of one new class (`FIXEngine`) is small; the benefit is that every cross-layer concern — when the transport opens, when tasks start, when bytes flow in, when bytes flow out, when errors move status to `ERROR` — lives in exactly one place, with one set of tests. The Transport Protocol keeps `FIXEngine` socket-agnostic; today's WebSocket slots in, tomorrow's TCP or HTTP/2 slots in identically. The user-facing API (`engine.connect`, `engine.disconnect`, callbacks on the session) stays the friendly shape people expect from a FIX engine.
+`FIXSession` does what FIX engines have always done: it tracks the protocol state machine. Removing I/O from it makes the protocol provable in isolation, which is what banking customers will demand. The cost of one new class (`FIXSessionRunner`) is small; the benefit is that every cross-layer concern — when the transport opens, when tasks start, when bytes flow in, when bytes flow out, when errors move status to `ERROR` — lives in exactly one place, with one set of tests. The Transport Protocol keeps `FIXSessionRunner` socket-agnostic; today's WebSocket slots in, tomorrow's TCP or HTTP/2 slots in identically. The user-facing API (`runner.connect`, `runner.disconnect`, callbacks on the session) stays the friendly shape people expect from a FIX engine.

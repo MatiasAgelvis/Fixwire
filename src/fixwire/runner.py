@@ -1,4 +1,4 @@
-"""FIX Engine - Coordinates a FIXSession with a Transport.
+"""FIX Session Runner - Runs one FIXSession over one Transport.
 
 Middle layer between the pure protocol state machine (fixwire.core) and
 raw bytes I/O (fixwire.transport). Owns the asyncio tasks that move bytes
@@ -30,16 +30,16 @@ _IDLE_POLL = 0.05
 _HEARTBEAT_POLL = 1.0
 
 
-class FIXEngine:
-    """Coordinates a FIXSession with a Transport.
+class FIXSessionRunner:
+    """Runs one FIXSession over one Transport.
 
     Owns the asyncio tasks that move bytes in and out. Strict error handling:
     any uncaught task exception puts the session in ERROR and closes the transport.
 
     Usage:
-        engine = FIXEngine(session, transport)
-        await engine.connect()
-        await engine.disconnect()
+        runner = FIXSessionRunner(session, transport)
+        await runner.connect()
+        await runner.disconnect()
     """
 
     def __init__(self, session: FIXSession, transport: Transport) -> None:
@@ -133,7 +133,7 @@ class FIXEngine:
         await self.stop()
         await self._transport.close()
 
-        logger.info("engine.disconnected",
+        logger.info("runner.disconnected",
                     sender=self._session.config.sender_comp_id,
                     target=self._session.config.target_comp_id)
 
@@ -147,7 +147,7 @@ class FIXEngine:
                 timeout=self._session.config.logout_timeout,
             )
         except TimeoutError:
-            logger.warning("engine.logout_timeout",
+            logger.warning("runner.logout_timeout",
                            sender=self._session.config.sender_comp_id,
                            target=self._session.config.target_comp_id)
             self._session.status = SessionStatus.DISCONNECTED
@@ -165,13 +165,13 @@ class FIXEngine:
             return
         self._stop_event.clear()
         self._writer_task = asyncio.create_task(
-            self._writer_loop(), name="fixwire-engine-writer"
+            self._writer_loop(), name="fixwire-runner-writer"
         )
         self._reader_task = asyncio.create_task(
-            self._reader_loop(), name="fixwire-engine-reader"
+            self._reader_loop(), name="fixwire-runner-reader"
         )
         self._heartbeat_task = asyncio.create_task(
-            self._heartbeat_loop(), name="fixwire-engine-heartbeat"
+            self._heartbeat_loop(), name="fixwire-runner-heartbeat"
         )
 
     async def stop(self) -> None:
@@ -238,14 +238,14 @@ class FIXEngine:
 
     async def _teardown_on_error(self) -> None:
         """Announce the failure, then drain and close."""
-        logger.warning("engine.session_error",
+        logger.warning("runner.session_error",
                        sender=self._session.config.sender_comp_id,
                        target=self._session.config.target_comp_id)
         await self._drain_and_close()
 
     async def _teardown_on_logout(self) -> None:
         """Announce the clean logout, then drain and close."""
-        logger.info("engine.logout_complete",
+        logger.info("runner.logout_complete",
                     sender=self._session.config.sender_comp_id,
                     target=self._session.config.target_comp_id)
         await self._drain_and_close()
@@ -363,7 +363,7 @@ class FIXEngine:
         if self._stop_event.is_set():
             # Clean shutdown: the error is the transport closing under us.
             return
-        logger.error("engine.task_error",
+        logger.error("runner.task_error",
                      task=task_name,
                      error=str(error),
                      sender=self._session.config.sender_comp_id,
@@ -373,7 +373,7 @@ class FIXEngine:
         try:
             await self._transport.close()
         except Exception as close_error:
-            logger.warning("engine.close_after_error_failed",
+            logger.warning("runner.close_after_error_failed",
                            error=str(close_error))
 
     async def reconnect(self) -> None:

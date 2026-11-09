@@ -1,7 +1,7 @@
 """Tests for FIXServer — the overseer for concurrent client sessions.
 
 FIXServer is transport-agnostic: it adopts an already-connected Transport
-and owns the FIXEngine lifecycle for it. The WebSocket layer is a thin
+and owns the FIXSessionRunner lifecycle for it. The WebSocket layer is a thin
 adapter on top, so these tests use InMemoryTransport and need no sockets.
 """
 
@@ -107,7 +107,7 @@ class TestFIXServerAccept:
     ):
         """When the session ends, the engine is torn down and deregistered."""
         # Arrange: fast heartbeat tick so peer logout is noticed promptly
-        monkeypatch.setattr("fixwire.engine._HEARTBEAT_POLL", 0.01)
+        monkeypatch.setattr("fixwire.runner._HEARTBEAT_POLL", 0.01)
         transport.feed(_peer_logon())
         task = asyncio.create_task(server.serve_connection(transport))
         await _wait_until(lambda: server.session_count == 1)

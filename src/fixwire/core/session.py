@@ -403,7 +403,7 @@ class FIXSession:
 
         Pure state transition — this queues the Logout and returns. It
         does not wait for the peer's Logout response and applies no
-        timeout: owning time is the caller's job. `FIXEngine.disconnect()`
+        timeout: owning time is the caller's job. `FIXSessionRunner.disconnect()`
         drives the wait using `config.logout_timeout` and forces the
         session to DISCONNECTED if the peer never replies.
 
@@ -442,7 +442,7 @@ class FIXSession:
         TestRequest terminates the session (Logout + ERROR); otherwise a
         TestRequest is sent to probe the peer.
 
-        Pure protocol decision — no timers. FIXEngine calls this on its
+        Pure protocol decision — no timers. FIXSessionRunner calls this on its
         heartbeat task on a fixed interval.
         """
         if self.status != SessionStatus.LOGGED_ON:

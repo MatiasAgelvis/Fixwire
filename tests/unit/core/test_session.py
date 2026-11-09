@@ -51,7 +51,8 @@ class TestFIXSessionPurity:
 
     @pytest.mark.asyncio
     async def test_connect_spawns_no_background_tasks(self, session):
-        """Test that connect() creates no asyncio tasks; tasks live in FIXEngine."""
+        """Test that connect() creates no asyncio tasks; they live in the
+        runner."""
         # Arrange
         tasks_before = asyncio.all_tasks()
 
@@ -511,7 +512,7 @@ class TestFIXSessionIncomingSequence:
 class TestFIXSessionDisconnect:
     """disconnect() is a pure state transition — it must not wait.
 
-    Owning time is the caller's job (see FIXEngine.disconnect). These tests
+    Owning time is the caller's job (see FIXSessionRunner.disconnect). These tests
     pin that contract so the wait cannot silently creep back in.
     """
 
