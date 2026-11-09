@@ -214,6 +214,15 @@ class FIXEngine:
         except (TimeoutError, asyncio.CancelledError):
             task.cancel()
 
+    async def wait_closed(self) -> None:
+        """Block until the engine stops.
+
+        Returns when the session ends (ERROR or peer logout) or when
+        ``stop()`` / ``disconnect()`` is called. Used by callers that own
+        a connection — for example ``FIXServer`` — to know when to clean up.
+        """
+        await self._stop_event.wait()
+
     async def _drain_and_close(self) -> None:
         """Drain queued outbound, then close the transport.
 
