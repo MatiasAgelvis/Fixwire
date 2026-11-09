@@ -53,7 +53,7 @@ Every milestone declares which level it aims at. Level must be **proven via the 
 | # | Milestone | Test bar | Status | Notes |
 |---|---|---|---|---|
 | M0 | Foundations (core protocol + transport) | A | ✅ Done | message, parser, factory, session — protocol logic |
-| M1 | Engine architecture (extract `FIXEngine`, wire transport) | A | ✅ Done | `FIXEngine` + reader/writer tasks + lifecycle; design doc in `docs/design/session-transport.md` |
+| M1 | Engine architecture (extract `FIXSessionRunner`, wire transport) | A | ✅ Done | `FIXSessionRunner` + reader/writer tasks + lifecycle; design doc in `docs/design/session-transport.md` |
 | M2 | Protocol hardening (seq verify, heartbeat, reject, gap-fill) | B | [ ] Todo | Incoming seq verify is the critical missing piece |
 | M3 | Resilience (reconnect, persistence, audit logging) | B | [ ] Todo | Pluggable `SequenceStore` interface; file-backed default |
 | M4 | Security (WSS, TLS, no-secret-in-logs) | B | [ ] Todo | `wss://` first-class; cert validation configurable |
@@ -87,11 +87,11 @@ Every milestone declares which level it aims at. Level must be **proven via the 
 **Goal:** Wire the FIX protocol state machine to the transport via a dedicated middle layer. After M1, a session can send and receive real FIX messages over a real WebSocket.
 
 **Scope:**
-- Refactor `FIXSession` into a **pure protocol state machine**: no asyncio tasks, no transport references, no I/O concerns. Its data plane is `send(msg)` and `receive(raw_bytes)`; `connect()` / `disconnect()` remain as lifecycle hooks driven by the engine.
-- Add **`FIXEngine`** as the middle-layer coordinator that owns the transport and the I/O machinery.
-- Inbound model: **push with task guards** (design doc, Decision 3). The engine's reader task feeds `transport.receive()` bytes straight into `session.receive()`; task guards catch exceptions, log, and move the session to `ERROR`. Backpressure rides on protocol flow control: while handlers run, the reader does not drain the socket, so TCP slows the peer. Messages are never buffered out of order or dropped.
+- Refactor `FIXSession` into a **pure protocol state machine**: no asyncio tasks, no transport references, no I/O concerns. Its data plane is `send(msg)` and `receive(raw_bytes)`; `connect()` / `disconnect()` remain as lifecycle hooks driven by the runner.
+- Add **`FIXSessionRunner`** as the middle-layer coordinator that owns the transport and the I/O machinery.
+- Inbound model: **push with task guards** (design doc, Decision 3). The runner's reader task feeds `transport.receive()` bytes straight into `session.receive()`; task guards catch exceptions, log, and move the session to `ERROR`. Backpressure rides on protocol flow control: while handlers run, the reader does not drain the socket, so TCP slows the peer. Messages are never buffered out of order or dropped.
 - Outbound: writer task drains `FIXSession._send_queue` and pushes bytes through the transport.
-- Lifecycle: `FIXEngine.connect()`, `FIXEngine.disconnect()`, with `engine.reconnect()` prepared but unused until M3.
+- Lifecycle: `FIXSessionRunner.connect()`, `FIXSessionRunner.disconnect()`, with `FIXSessionRunner.reconnect()` prepared but unused until M3.
 - Strict error handling: any unhandled exception in a reader/writer task → `session.status = ERROR`, transport closed, exception logged.
 - WSS usable immediately (no client-cert auth yet — M4).
 
@@ -104,7 +104,7 @@ Every milestone declares which level it aims at. Level must be **proven via the 
 - TLS client cert auth (M4)
 
 **Deliverables:**
-- ✅ `FIXEngine` class with documented public API
+- ✅ `FIXSessionRunner` class with documented public API
 - ✅ `FIXSession` slimmed down (no `_heartbeat_task`, no transport reference, no I/O)
 - ✅ Refactor test suite that proves the protocol layer works without I/O
 - ✅ **One integration test:** two sessions over a real WebSocket exchange Logon → Heartbeat → Logout (`tests/integration/test_engine_e2e.py`)
@@ -146,7 +146,7 @@ Every milestone declares which level it aims at. Level must be **proven via the 
 
 **Scope:**
 - **`SequenceStore` protocol.** Pluggable; default implementation = file-backed JSON per session (atomic write on each seq change).
-- **Reconnection with exponential backoff.** `engine.reconnect(Strategy)` with `max_retries` and base `retry_delay`; honors `config.max_retries` and `config.retry_delay` from `SessionConfig`.
+- **Reconnection with exponential backoff.** `FIXSessionRunner.reconnect(Strategy)` with `max_retries` and base `retry_delay`; honors `config.max_retries` and `config.retry_delay` from `SessionConfig`.
 - **Crash-safe outbox** (foundation for M5). Outbound messages persisted before they hit the wire; restored on reconnect.
 - **Audit logging.** Every state transition, every msg in/out, every error — structured via `structlog`, levels correct (DEBUG for message traces, INFO for lifecycle, WARNING for recoverable, ERROR for sessions-ending, no CRITICAL).
 - **Bounded inbound queue** (the M1 deferral lands here). Depth-bounded queue between transport and session, with queue-full policy: block with timeout → `ERROR` — **never drop**; sequence integrity is inviolable. Exposes queue depth for observability.

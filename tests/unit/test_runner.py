@@ -1,4 +1,4 @@
-"""Tests for FIXEngine."""
+"""Tests for FIXSessionRunner."""
 
 import asyncio
 from datetime import timedelta
@@ -10,7 +10,7 @@ from fixwire.core.factory import FIXMessageFactory
 from fixwire.core.session import FIXSession, SessionConfig, SessionStatus
 from fixwire.core.tags import MsgType
 from fixwire.core.time import utc_now
-from fixwire.engine import FIXEngine
+from fixwire.runner import FIXSessionRunner
 from fixwire.transport import InMemoryTransport
 
 
@@ -28,12 +28,12 @@ def transport() -> InMemoryTransport:
 
 
 @pytest.fixture
-def engine(session: FIXSession, transport: InMemoryTransport) -> FIXEngine:
+def engine(session: FIXSession, transport: InMemoryTransport) -> FIXSessionRunner:
     """Create an engine over the in-memory transport."""
-    return FIXEngine(session, transport)
+    return FIXSessionRunner(session, transport)
 
 
-class TestFIXEngineCreation:
+class TestFIXSessionRunnerCreation:
     """Test engine construction and wiring."""
 
     def test_create_engine(self, engine, session, transport):
@@ -49,7 +49,7 @@ class TestFIXEngineCreation:
         tasks_before = asyncio.all_tasks()
 
         # Act
-        FIXEngine(session, transport)
+        FIXSessionRunner(session, transport)
 
         # Assert
         assert asyncio.all_tasks() == tasks_before
@@ -77,7 +77,7 @@ class TestFIXEngineCreation:
         assert engine.is_connected is True
 
 
-class TestFIXEngineDisconnect:
+class TestFIXSessionRunnerDisconnect:
     """Test engine teardown."""
 
     @pytest.mark.asyncio
@@ -188,7 +188,7 @@ class TestFIXEngineDisconnect:
         assert transport.close_count == 1
 
 
-class TestFIXEngineReconnect:
+class TestFIXSessionRunnerReconnect:
     """Test that reconnect() is not yet implemented."""
 
     @pytest.mark.asyncio
@@ -199,8 +199,8 @@ class TestFIXEngineReconnect:
             await engine.reconnect()
 
 
-class TestFIXEngineConnect:
-    """Test FIXEngine.connect(): open transport, spawn tasks, drive logon.
+class TestFIXSessionRunnerConnect:
+    """Test FIXSessionRunner.connect(): open transport, spawn tasks, drive logon.
 
     Covers the happy path (transport opens, both tasks spawn, logon handshake
     reaches LOGGED_ON), idempotency, and every failure mode we expect
@@ -373,7 +373,7 @@ class TestFIXEngineConnect:
         assert engine._reader_task is None
 
 
-class TestFIXEngineWriterTask:
+class TestFIXSessionRunnerWriterTask:
     """Test the writer task: drain session._send_queue, serialize, transport.send."""
 
     @pytest.mark.asyncio
@@ -457,10 +457,10 @@ class TestFIXEngineWriterTask:
         assert session.status == SessionStatus.ERROR
 
 
-class TestFIXEngineReaderTask:
+class TestFIXSessionRunnerReaderTask:
     """Test the reader task: drain transport, feed session.receive().
 
-    Mirror image of TestFIXEngineWriterTask. Covers happy path (transport
+    Mirror image of TestFIXSessionRunnerWriterTask. Covers happy path (transport
     bytes are processed by the session), failure paths (transport failure
     and parser failure both escalate to session.status = ERROR), and
     lifecycle (clean stop is not treated as an error).
@@ -594,7 +594,7 @@ class TestFIXEngineReaderTask:
         assert transport.sent == []
 
 
-class TestFIXEngineCoordination:
+class TestFIXSessionRunnerCoordination:
     """Test the interaction between connect(), reader, writer, and session.
 
     These tests verify that after connect() returns, the engine is fully
@@ -650,7 +650,7 @@ class TestFIXEngineCoordination:
         assert session._state.test_request_id is None
 
 
-class TestFIXEngineHeartbeat:
+class TestFIXSessionRunnerHeartbeat:
     """The heartbeat task: drive session checks and own ERROR teardown.
 
     The session exposes check_peer_liveness() as a pure decision but owns no
@@ -767,7 +767,7 @@ class TestFIXEngineHeartbeat:
         assert engine._heartbeat_task is None
 
 
-class TestFIXEngineTeardown:
+class TestFIXSessionRunnerTeardown:
     """Teardown must flush queued outbound before cutting the wire.
 
     The writer used to exit the moment _stop_event was set, so a Logout
@@ -881,7 +881,7 @@ class TestFIXEngineTeardown:
         )
 
 
-async def _drain_writer(engine: FIXEngine, timeout: float = 2.0) -> None:
+async def _drain_writer(engine: FIXSessionRunner, timeout: float = 2.0) -> None:
     """Wait until the session queue is empty and the writer has had a
     chance to flush the last message.
 
@@ -901,7 +901,7 @@ async def _drain_writer(engine: FIXEngine, timeout: float = 2.0) -> None:
         await asyncio.sleep(0)
 
 
-async def _drain_reader(engine: FIXEngine, turns: int = 4) -> None:
+async def _drain_reader(engine: FIXSessionRunner, turns: int = 4) -> None:
     """Yield to the event loop a few times so the reader task can process
     anything the transport has already received.
     """

@@ -9,9 +9,9 @@ Do these soon — before they grow too large.
 
 **Problem:** nothing manages server-side sessions. `WebSocketServer` only
 tracks raw sockets, keyed by `"ip:port"`. Each connection handler must
-build its own adapter + `FIXSession` + `FIXEngine` and remember to
+build its own adapter + `FIXSession` + `FIXSessionRunner` and remember to
 `disconnect()` — the only working example is inline in
-`tests/integration/test_engine_e2e.py`. That means: no FIX session
+`tests/integration/test_runner_e2e.py`. That means: no FIX session
 registry, no duplicate-logon detection, no connection cap, no
 centralized cleanup, no way to list active sessions.
 
@@ -28,13 +28,13 @@ sequence numbers of both. Duplicate logon must log out the old session
 class FIXServer:
     def __init__(self, config_factory, host, port, max_sessions=100): ...
     async def start(self): ...
-    async def stop(self): ...            # stop every engine, then the WS server
+    async def stop(self): ...            # stop every runner
     async def _on_connection(self, ws):
         adapter = WebSocketTransportAdapter(ws)
         session = FIXSession(config_factory())
-        engine  = FIXEngine(session, adapter)
+        runner  = FIXSessionRunner(session, adapter)
         # register by (sender, target) -> duplicate policy -> try/finally disconnect
-    def sessions(self) -> list[FIXEngine]: ...   # introspection
+    def sessions(self) -> list[FIXSessionRunner]: ...   # introspection
 ```
 
 **Test sketch:**
@@ -42,10 +42,10 @@ class FIXServer:
 ```
 test_two_clients_get_independent_sessions      each has own seq + state
 test_duplicate_logon_replaces_or_rejects        same comp IDs -> policy
-test_disconnect_deregisters_and_stops_engine    no task leak
+test_disconnect_deregisters_and_stops_runner    no task leak
 test_max_sessions_rejects_extra_connection      cap enforced
 test_stop_tears_down_all_sessions               server.stop() drains
-test_sessions_exposes_active_engines            introspection
+test_sessions_exposes_active_runners            introspection
 ```
 
 **Placement:** not in any milestone today. `MILESTONES.md` puts the
@@ -62,7 +62,7 @@ per-session dispatcher discussed for M6.
 **Problem:** teardown can drop an outbound `Logout`.
 
 - `session._terminate_sequence_too_low()` does `await self.send(logout)`
-  then `self.status = ERROR`. The engine's heartbeat loop notices ERROR,
+  then `self.status = ERROR`. The runner's heartbeat loop notices ERROR,
   sets `_stop_event`, and closes the transport. The writer loop is
   `while not self._stop_event.is_set()`, so it exits **without draining**
   the queue. The writer polls at 50 ms and the heartbeat at 1 s, so the
@@ -104,7 +104,7 @@ if no data has gone out within `HeartBtInt`. Interop currently works only
 because a strict peer probes us and we answer — we are not holding up
 our half of the contract.
 
-Likely a `session.check_heartbeat_send()` driven by the same engine
+Likely a `session.check_heartbeat_send()` driven by the same runner
 task, using `_state.last_sent_time` (already maintained by `send()`).
 
 ## Test Infrastructure

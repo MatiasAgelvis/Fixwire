@@ -1,6 +1,6 @@
 """FIX Server - Overseer for concurrent client sessions.
 
-Owns the lifecycle of one ``FIXEngine`` per accepted connection: creates
+Owns the lifecycle of one ``FIXSessionRunner`` per accepted connection: creates
 the session, registers it, and guarantees teardown when the connection
 ends.
 
@@ -29,14 +29,14 @@ from collections.abc import Callable
 import structlog
 
 from fixwire.core.session import FIXSession, SessionConfig
-from fixwire.engine import FIXEngine
+from fixwire.runner import FIXSessionRunner
 from fixwire.transport import Transport
 
 logger = structlog.get_logger()
 
 
 class FIXServer:
-    """Manages one FIXEngine per accepted connection.
+    """Manages one FIXSessionRunner per accepted connection.
 
     The engine owns its own I/O tasks, heartbeat monitoring, and error
     teardown. This class owns only the *set* of engines: admission control,
@@ -58,7 +58,7 @@ class FIXServer:
         """
         self._config_factory = config_factory
         self._max_sessions = max_sessions
-        self._engines: set[FIXEngine] = set()
+        self._engines: set[FIXSessionRunner] = set()
 
     # --- Introspection ---
 
@@ -67,7 +67,7 @@ class FIXServer:
         """Number of active sessions."""
         return len(self._engines)
 
-    def sessions(self) -> list[FIXEngine]:
+    def sessions(self) -> list[FIXSessionRunner]:
         """Snapshot of the active engines."""
         return list(self._engines)
 
@@ -85,7 +85,7 @@ class FIXServer:
             await transport.close()
             return
 
-        engine = FIXEngine(FIXSession(self._config_factory()), transport)
+        engine = FIXSessionRunner(FIXSession(self._config_factory()), transport)
         self._engines.add(engine)
         try:
             await engine.connect()
