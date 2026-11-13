@@ -25,6 +25,7 @@ the application (or a thin adapter module), for example:
 from __future__ import annotations
 
 from collections.abc import Callable
+from dataclasses import dataclass
 
 import structlog
 
@@ -34,6 +35,12 @@ from fixwire.runner import FIXSessionRunner
 from fixwire.transport import Transport
 
 logger = structlog.get_logger()
+
+
+@dataclass
+class ServerConfig:
+    """FIX Server Configuration."""
+    max_sessions: int = 100
 
 
 class FIXServer:
@@ -47,18 +54,17 @@ class FIXServer:
     def __init__(
         self,
         config_factory: Callable[[], SessionConfig],
-        max_sessions: int = 100,
+        config: ServerConfig | None = None,
     ) -> None:
         """Initialize the server.
 
         Args:
             config_factory: Builds a fresh ``SessionConfig`` per session
                 (each session needs its own state).
-            max_sessions: Maximum concurrent sessions; further connections
-                are closed on arrival.
+            config: Server-wide settings; defaults to ``ServerConfig()``.
         """
         self._config_factory = config_factory
-        self._max_sessions = max_sessions
+        self.config = config if config is not None else ServerConfig()
         self._engines: set[FIXSessionRunner] = set()
         # Live identities, keyed by (peer SenderCompID, peer TargetCompID).
         self._sessions: dict[tuple[str, str], FIXSessionRunner] = {}
@@ -85,9 +91,9 @@ class FIXServer:
         Returns when the session ends, after tearing the engine down and
         deregistering it. Over the cap, the transport is closed instead.
         """
-        if len(self._engines) >= self._max_sessions:
+        if len(self._engines) >= self.config.max_sessions:
             logger.warning("server.max_sessions_reached",
-                           max=self._max_sessions)
+                           max=self.config.max_sessions)
             await transport.close()
             return
 

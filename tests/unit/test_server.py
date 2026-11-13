@@ -12,7 +12,7 @@ import pytest
 from fixwire.core.factory import FIXMessageFactory
 from fixwire.core.session import FIXSession, SessionConfig, SessionStatus
 from fixwire.runner import FIXSessionRunner
-from fixwire.server import FIXServer
+from fixwire.server import FIXServer, ServerConfig
 from fixwire.transport import InMemoryTransport
 
 
@@ -61,7 +61,7 @@ async def _wait_until(predicate, timeout: float = 1.0) -> None:
 
 @pytest.fixture
 def server() -> FIXServer:
-    return FIXServer(_config_factory, max_sessions=10)
+    return FIXServer(_config_factory, config=ServerConfig(max_sessions=10))
 
 
 @pytest.fixture
@@ -144,7 +144,7 @@ class TestFIXServerAccept:
     async def test_max_sessions_closes_extra_connection(self):
         """Beyond the cap, a new connection is closed and not registered."""
         # Arrange
-        server = FIXServer(_config_factory, max_sessions=1)
+        server = FIXServer(_config_factory, config=ServerConfig(max_sessions=1))
         t1 = InMemoryTransport()
         t1.feed(_peer_logon())
         task1 = asyncio.create_task(server.serve_connection(t1))
