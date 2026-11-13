@@ -79,6 +79,7 @@ class FIXSession:
         self._state = _SessionState()
         self._send_queue: asyncio.Queue[FIXMessage] = asyncio.Queue()
         self._receive_callbacks: list[Callable[[FIXMessage], Any]] = []
+        self._logon_validators: list[Callable[[FIXMessage], bool]] = []
 
     @property
     def is_connected(self) -> bool:
@@ -105,6 +106,15 @@ class FIXSession:
     def on_message(self, callback: Callable[[FIXMessage], Any]) -> None:
         """Register callback for received messages."""
         self._receive_callbacks.append(callback)
+
+    def on_logon_request(self, validator: Callable[[FIXMessage], bool]) -> None:
+        """Register a validator consulted before accepting an inbound Logon.
+
+        Returning False rejects the session: a Logout is queued and the
+        session moves to ERROR. Use this for admission policy such as
+        duplicate-session detection.
+        """
+        self._logon_validators.append(validator)
 
     def _next_seq_num(self) -> int:
         """Get next outgoing sequence number."""
@@ -259,6 +269,28 @@ class FIXSession:
         await self.send(logout)
         self.status = SessionStatus.ERROR
 
+    async def _admit_logon(self, msg: FIXMessage) -> bool:
+        """Consult the registered validators before accepting a Logon.
+
+        On rejection, queue a Logout addressed to the peer and move to
+        ERROR so the engine tears the connection down.
+        """
+        for validator in self._logon_validators:
+            if not validator(msg):
+                logger.warning("session.logon_rejected",
+                               sender=msg.sender,
+                               target=msg.target)
+                logout = FIXMessageFactory.create_logout(
+                    sender=self.config.sender_comp_id,
+                    target=msg.sender,  # reply to the actual peer
+                    seq=0,  # Will be set by send()
+                    text="Session already logged on",
+                )
+                await self.send(logout)
+                self.status = SessionStatus.ERROR
+                return False
+        return True
+
     async def _handle_logon(self, msg: FIXMessage) -> None:
         """Handle Logon message.
 
@@ -274,7 +306,13 @@ class FIXSession:
                        sender=self.config.sender_comp_id,
                        target=self.config.target_comp_id)
         elif self.status in (SessionStatus.DISCONNECTED, SessionStatus.CONNECTING):
-            # We received logon, need to respond
+            # We received logon, need to respond.
+            # The peer's SenderCompID is our TargetCompID: learn it so
+            # responses (including a rejection Logout) are addressed
+            # correctly instead of to the configured placeholder.
+            self.config.target_comp_id = msg.sender
+            if not await self._admit_logon(msg):
+                return
             self.status = SessionStatus.WAITING_LOGON
             self._state.incoming_seq_num = msg.sequence
 
