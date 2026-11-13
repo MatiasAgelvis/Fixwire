@@ -5,7 +5,11 @@ Do these soon — before they grow too large.
 
 ## Server Side
 
-### [ ] `FIXServer` — overseer for concurrent client sessions
+### [x] `FIXServer` — overseer for concurrent client sessions
+
+**Shipped:** transport-agnostic `serve_connection(transport)` with an
+identity registry and duplicate-logon rejection; listener wiring belongs
+to the application. The sketch below is the original plan.
 
 **Problem:** nothing manages server-side sessions. `WebSocketServer` only
 tracks raw sockets, keyed by `"ip:port"`. Each connection handler must
@@ -26,7 +30,7 @@ sequence numbers of both. Duplicate logon must log out the old session
 
 ```python
 class FIXServer:
-    def __init__(self, config_factory, host, port, max_sessions=100): ...
+    def __init__(self, config_factory, config: ServerConfig | None = None): ...
     async def start(self): ...
     async def stop(self): ...            # stop every runner
     async def _on_connection(self, ws):
