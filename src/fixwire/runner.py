@@ -96,6 +96,41 @@ class FIXSessionRunner:
             await self._teardown_after_failed_connect()
             raise
 
+    async def accept(self) -> None:
+        """Start the engine and wait for the peer's Logon (acceptor role).
+
+        Unlike ``connect()``, this sends no Logon — the peer initiates and
+        this side responds. Raises ``ConnectionError`` if the Logon is
+        rejected (e.g. duplicate session) and ``TimeoutError`` if none
+        arrives within ``logon_timeout``.
+        """
+        if self._writer_task is not None:
+            return
+        await self.start()
+        try:
+            await asyncio.wait_for(
+                self._wait_for_accept(),
+                timeout=self._session.config.logon_timeout,
+            )
+        except TimeoutError:
+            await self.stop()
+            raise
+        self._logged_on = True
+
+    async def _wait_for_accept(self) -> None:
+        """Wait for an inbound Logon to establish the session."""
+        while self._session.status in (
+            SessionStatus.DISCONNECTED,
+            SessionStatus.CONNECTING,
+            SessionStatus.WAITING_LOGON,
+        ):
+            await asyncio.sleep(0.01)
+        if self._session.status != SessionStatus.LOGGED_ON:
+            raise ConnectionError(
+                "Logon rejected; "
+                f"session.status={self._session.status.value}"
+            )
+
     async def _wait_for_logon(self) -> None:
         """Poll until the session reaches LOGGED_ON or fails.
 
@@ -343,6 +378,12 @@ class FIXSessionRunner:
                     timeout=_IDLE_POLL,
                 )
                 await self._session.receive(data)
+                # A message handler may have moved the session to ERROR
+                # (rejected logon, too-low sequence). React immediately
+                # rather than waiting for the next heartbeat tick.
+                if self._session.status == SessionStatus.ERROR:
+                    await self._teardown_on_error()
+                    return
             except TimeoutError:
                 continue
             except Exception as e:
