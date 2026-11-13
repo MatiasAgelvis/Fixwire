@@ -28,6 +28,7 @@ from collections.abc import Callable
 
 import structlog
 
+from fixwire.core.message import FIXMessage
 from fixwire.core.session import FIXSession, SessionConfig
 from fixwire.runner import FIXSessionRunner
 from fixwire.transport import Transport
@@ -59,6 +60,11 @@ class FIXServer:
         self._config_factory = config_factory
         self._max_sessions = max_sessions
         self._engines: set[FIXSessionRunner] = set()
+        # Live identities, keyed by (peer SenderCompID, peer TargetCompID).
+        self._sessions: dict[tuple[str, str], FIXSessionRunner] = {}
+        # Reverse index so releasing a session is O(1) instead of scanning
+        # every live identity.
+        self._identity: dict[FIXSessionRunner, tuple[str, str]] = {}
 
     # --- Introspection ---
 
@@ -86,9 +92,10 @@ class FIXServer:
             return
 
         engine = FIXSessionRunner(FIXSession(self._config_factory()), transport)
+        engine.session.on_logon_request(lambda msg: self._admit(msg, engine))
         self._engines.add(engine)
         try:
-            await engine.connect()
+            await engine.accept()
             await engine.wait_closed()
         except Exception as e:
             logger.warning("server.session_failed",
@@ -98,6 +105,30 @@ class FIXServer:
         finally:
             await engine.disconnect()
             self._engines.discard(engine)
+            self._release(engine)
+
+    def _admit(self, msg: FIXMessage, engine: FIXSessionRunner) -> bool:
+        """Admission policy: one live session per identity.
+
+        Returns False to reject a duplicate Logon; the session then sends
+        a Logout and terminates.
+        """
+        identity = (msg.sender, msg.target)
+        owner = self._sessions.get(identity)
+        if owner is not None and owner is not engine:
+            logger.warning("server.duplicate_logon",
+                           sender=msg.sender,
+                           target=msg.target)
+            return False
+        self._sessions[identity] = engine
+        self._identity[engine] = identity
+        return True
+
+    def _release(self, engine: FIXSessionRunner) -> None:
+        """Free the identity ``engine`` holds, if any."""
+        identity = self._identity.pop(engine, None)
+        if identity is not None and self._sessions.get(identity) is engine:
+            del self._sessions[identity]
 
     async def stop(self) -> None:
         """Disconnect every active session."""
