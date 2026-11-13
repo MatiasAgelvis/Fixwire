@@ -509,6 +509,53 @@ class TestFIXSessionIncomingSequence:
         assert session.get_next_expected_seq_num() == 10
 
 
+class TestFIXSessionLogonAdmission:
+    """A validator can veto an inbound Logon before the session accepts it."""
+
+    @pytest.mark.asyncio
+    async def test_validator_can_reject_logon(self, session):
+        """A rejecting validator queues a Logout and moves to ERROR."""
+        # Arrange
+        session.on_logon_request(lambda msg: False)
+        logon = FIXMessageFactory.create_logon("SERVER", "CLIENT", seq=1)
+
+        # Act
+        await session.receive(logon.serialize())
+
+        # Assert
+        logout = session._send_queue.get_nowait()
+        assert logout[35] == MsgType.LOGOUT
+        assert "already logged on" in logout[58]
+        assert session.status == SessionStatus.ERROR
+
+    @pytest.mark.asyncio
+    async def test_validator_can_accept_logon(self, session):
+        """An accepting validator lets the session log on normally."""
+        # Arrange
+        session.on_logon_request(lambda msg: True)
+        logon = FIXMessageFactory.create_logon("SERVER", "CLIENT", seq=1)
+
+        # Act
+        await session.receive(logon.serialize())
+
+        # Assert
+        assert session.status == SessionStatus.LOGGED_ON
+
+    @pytest.mark.asyncio
+    async def test_rejection_logout_targets_the_peer(self, session):
+        """The rejection Logout is addressed to the peer's SenderCompID."""
+        # Arrange
+        session.on_logon_request(lambda msg: False)
+        logon = FIXMessageFactory.create_logon("PEER01", "CLIENT", seq=1)
+
+        # Act
+        await session.receive(logon.serialize())
+
+        # Assert: TargetCompID is the peer, not the configured placeholder
+        logout = session._send_queue.get_nowait()
+        assert logout[56] == "PEER01"
+
+
 class TestFIXSessionDisconnect:
     """disconnect() is a pure state transition — it must not wait.
 
