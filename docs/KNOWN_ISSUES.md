@@ -26,22 +26,22 @@
 
 ### Session Recovery
 - [ ] Send Reject (MsgType=3) for invalid messages
-- [ ] Send ResendRequest (MsgType=2) for missed messages
-- [ ] Handle GapFill (SequenceReset-GapFill)
+- [x] Send ResendRequest (MsgType=2) for missed messages
+- [x] Handle GapFill (SequenceReset-GapFill)
 - [ ] Sequence number synchronization
 
 ### Sequence Numbers
 - [ ] Gap detection and recovery
 - [ ] ResendRequest handling
-- [ ] SequenceReset handling
+- [x] SequenceReset handling
 
 ## Session
 
 ### Connection Management
 - [ ] Reconnection with exponential backoff
-- [ ] Heartbeat timeout detection
-- [ ] Logon timeout handling
-- [ ] Logout timeout handling
+- [x] Heartbeat timeout detection
+- [x] Logon timeout handling
+- [x] Logout timeout handling
 
 ### Recovery
 - [ ] ResendRequest for missed messages
@@ -52,8 +52,8 @@
 
 ### WebSocket
 - [ ] Handle partial frame delivery
-- [ ] Handle binary vs text frames
-- [ ] Connection keep-alive
+- [x] Handle binary vs text frames
+- [x] Connection keep-alive
 
 ### Error Handling
 - [ ] Network interruption recovery
