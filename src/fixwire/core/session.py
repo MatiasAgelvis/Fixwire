@@ -7,7 +7,7 @@ from __future__ import annotations
 
 import asyncio
 from collections.abc import Callable
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from datetime import datetime
 from enum import StrEnum
 from typing import Any
@@ -16,7 +16,7 @@ import structlog
 
 from fixwire.core.factory import FIXMessageFactory
 from fixwire.core.message import FIXMessage
-from fixwire.core.parser import FIXParser
+from fixwire.core.parser import FIXParser, ParserConfig
 from fixwire.core.tags import MsgType, Tags
 from fixwire.core.time import utc_now
 
@@ -44,6 +44,7 @@ class SessionConfig:
     reset_seq_num: bool = False
     max_retries: int = 3
     retry_delay: float = 1.0
+    parser: ParserConfig = field(default_factory=ParserConfig)
 
 
 @dataclass
@@ -74,7 +75,7 @@ class FIXSession:
 
     def __init__(self, config: SessionConfig) -> None:
         self.config = config
-        self.parser = FIXParser()
+        self.parser = FIXParser(config.parser)
         self.factory = FIXMessageFactory()
         self._state = _SessionState()
         self._send_queue: asyncio.Queue[FIXMessage] = asyncio.Queue()

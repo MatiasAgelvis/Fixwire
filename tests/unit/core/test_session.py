@@ -7,6 +7,7 @@ from datetime import timedelta
 import pytest
 
 from fixwire.core.factory import FIXMessageFactory
+from fixwire.core.parser import ParserConfig
 from fixwire.core.session import FIXSession, SessionConfig, SessionStatus
 from fixwire.core.tags import MsgType
 from fixwire.core.time import utc_now
@@ -29,6 +30,22 @@ class TestFIXSessionCreation:
         assert session.is_connected is False
         assert session.get_next_send_seq_num() == 1
         assert session.get_next_expected_seq_num() == 1
+
+    def test_parser_config_is_honoured(self):
+        """The session builds its parser from the configured settings."""
+        # Arrange
+        config = SessionConfig(
+            sender_comp_id="CLIENT",
+            target_comp_id="SERVER",
+            parser=ParserConfig(strict=False, max_message_size=2048),
+        )
+
+        # Act
+        session = FIXSession(config)
+
+        # Assert
+        assert session.parser.strict is False
+        assert session.parser.config.max_message_size == 2048
 
 
 class TestFIXSessionPurity:
