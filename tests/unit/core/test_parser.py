@@ -4,7 +4,7 @@ import pytest
 
 from fixwire.core.constants import SOH
 from fixwire.core.message import FIXMessage
-from fixwire.core.parser import FIXParseError, FIXParser
+from fixwire.core.parser import FIXParseError, FIXParser, ParserConfig
 
 
 def build_raw_message(fields: dict[int, str]) -> tuple[FIXMessage, bytes]:
@@ -320,7 +320,7 @@ class TestFIXParserChecksumValidation:
     def test_checksum_non_strict_invalid_returns_false(self):
         """Non-strict mode returns False on invalid checksum."""
         # Arrange
-        parser = FIXParser(strict=False)
+        parser = FIXParser(ParserConfig(strict=False))
         original, raw = build_raw_message({35: "D", 49: "C1", 56: "M1"})
         raw = raw[:-4] + b"999\x01"  # Corrupt checksum
 
@@ -360,7 +360,7 @@ class TestFIXParserStrictMode:
     def test_non_strict_mode_skips_invalid_begin_string(self):
         """Test non-strict mode skips invalid BeginString."""
         # Arrange
-        parser = FIXParser(strict=False)
+        parser = FIXParser(ParserConfig(strict=False))
         raw = SOH.join([
             "8=INVALID",
             "9=10",
@@ -537,3 +537,52 @@ class TestFIXParserEdgeCases:
         assert parsed[11] == original[11]
         assert parsed[55] == original[55]
         assert parsed[58] == original[58]
+
+
+class TestFIXParserConfig:
+    """Parse limits and mode are configuration, not module-level globals."""
+
+    def test_default_config_matches_documented_limits(self):
+        """Defaults are pinned so they cannot drift silently."""
+        config = ParserConfig()
+
+        assert config.strict is True
+        assert config.max_message_size == 1_048_576
+        assert config.max_tags_per_message == 500
+
+    def test_strict_mode_comes_from_config(self):
+        """The parser reads strict mode from its config."""
+        parser = FIXParser(ParserConfig(strict=False))
+
+        assert parser.strict is False
+
+    def test_oversized_message_is_rejected_in_strict_mode(self):
+        """A complete message over the cap raises instead of being parsed."""
+        _, raw = build_raw_message({35: "D", 49: "C1", 56: "M1"})
+        parser = FIXParser(ParserConfig(max_message_size=len(raw) - 1))
+
+        with pytest.raises(FIXParseError, match="maximum size"):
+            parser.parse(raw)
+
+    def test_unterminated_message_cannot_grow_past_the_cap(self):
+        """A peer that never sends a checksum cannot grow the buffer forever."""
+        parser = FIXParser(ParserConfig(max_message_size=16))
+        unterminated = b"8=FIX.4.4\x019=99999\x01" + b"X" * 32
+
+        with pytest.raises(FIXParseError, match="maximum size"):
+            parser.parse(unterminated)
+
+    def test_oversized_message_is_dropped_in_non_strict_mode(self):
+        """Non-strict mode logs and drops instead of raising."""
+        _, raw = build_raw_message({35: "D", 49: "C1", 56: "M1"})
+        parser = FIXParser(ParserConfig(strict=False, max_message_size=16))
+
+        assert parser.parse(raw) == []
+
+    def test_max_tags_per_message_comes_from_config(self):
+        """The tag cap is configurable per parser."""
+        _, raw = build_raw_message({35: "D", 49: "C1", 56: "M1"})
+        parser = FIXParser(ParserConfig(max_tags_per_message=3))
+
+        with pytest.raises(FIXParseError, match="Too many tags"):
+            parser.parse(raw)
