@@ -55,15 +55,33 @@ class WebSocketTransport:
     _ws: ClientConnection | None
     _connected: bool
 
-    def __init__(self, url: str, timeout: float = 30.0) -> None:
+    def __init__(
+        self,
+        url: str,
+        timeout: float = 30.0,
+        max_size: int = 1_048_576,
+        ping_interval: float | None = None,
+        ping_timeout: float | None = None,
+    ) -> None:
         """Initialize WebSocket client transport.
 
         Args:
             url: WebSocket server URL (ws:// or wss://).
             timeout: Connection timeout in seconds.
+            max_size: Largest frame accepted, in bytes. Keep it at or above
+                ``ParserConfig.max_message_size`` so oversized messages are
+                rejected by the FIX layer, which can explain why.
+            ping_interval: Seconds between WebSocket keepalive pings.
+                Defaults to None: FIX heartbeats are the keepalive, and a
+                second, more aggressive timer would close the connection as
+                a transport error before the session could escalate.
+            ping_timeout: Seconds to wait for a pong before closing.
         """
         self.url = url
         self.timeout = timeout
+        self.max_size = max_size
+        self.ping_interval = ping_interval
+        self.ping_timeout = ping_timeout
         self._ws = None
         self._connected = False
 
@@ -92,7 +110,12 @@ class WebSocketTransport:
         """
         try:
             self._ws = await asyncio.wait_for(
-                connect(self.url),
+                connect(
+                    self.url,
+                    max_size=self.max_size,
+                    ping_interval=self.ping_interval,
+                    ping_timeout=self.ping_timeout,
+                ),
                 timeout=self.timeout
             )
             self._connected = True
@@ -169,15 +192,33 @@ class WebSocketServer:
         await server.stop()
     """
 
-    def __init__(self, host: str = "0.0.0.0", port: int = 8001) -> None:
+    def __init__(
+        self,
+        host: str = "0.0.0.0",
+        port: int = 8001,
+        max_size: int = 1_048_576,
+        ping_interval: float | None = None,
+        ping_timeout: float | None = None,
+    ) -> None:
         """Initialize WebSocket server.
 
         Args:
             host: Host to bind to.
             port: Port to listen on.
+            max_size: Largest frame accepted, in bytes. Keep it at or above
+                ``ParserConfig.max_message_size`` so oversized messages are
+                rejected by the FIX layer, which can explain why.
+            ping_interval: Seconds between WebSocket keepalive pings.
+                Defaults to None: FIX heartbeats are the keepalive, and a
+                second, more aggressive timer would close the connection as
+                a transport error before the session could escalate.
+            ping_timeout: Seconds to wait for a pong before closing.
         """
         self.host = host
         self.port = port
+        self.max_size = max_size
+        self.ping_interval = ping_interval
+        self.ping_timeout = ping_timeout
         self._server = None
         self._connections: dict[str, ServerConnection] = {}
         self._connection_handler: Callable | None = None
@@ -240,7 +281,10 @@ class WebSocketServer:
         self._server = await serve(
             self._handle_connection,
             self.host,
-            self.port
+            self.port,
+            max_size=self.max_size,
+            ping_interval=self.ping_interval,
+            ping_timeout=self.ping_timeout,
         )
         logger.info("transport.ws.server_started",
                     host=self.host,
