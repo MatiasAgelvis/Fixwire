@@ -5,6 +5,8 @@ Handles parsing of FIX protocol messages from wire format.
 
 from __future__ import annotations
 
+from dataclasses import dataclass
+
 import structlog
 
 from fixwire.core.constants import SOH
@@ -16,11 +18,14 @@ logger = structlog.get_logger()
 FIELD_DELIMITER = SOH
 FIX_DELIMITER = b"="
 
-# Maximum message size (1MB)
-MAX_MESSAGE_SIZE = 1_048_576
 
-# Maximum number of tags per message
-MAX_TAGS_PER_MESSAGE = 500
+@dataclass
+class ParserConfig:
+    """FIX Parser Configuration."""
+    strict: bool = True
+    # 1MB: far above any real FIX message, low enough to bound a hostile peer.
+    max_message_size: int = 1_048_576
+    max_tags_per_message: int = 500
 
 
 class FIXParseError(Exception):
@@ -38,7 +43,7 @@ class FIXParser:
     Parses raw FIX byte stream into FIXMessage objects.
 
     Args:
-        strict: If True, enables strict validation of checksum and message size.
+        config: Parser settings; defaults to ``ParserConfig()``.
     Usage:
         parser = FIXParser()
         messages = parser.parse(raw_bytes)
@@ -46,19 +51,19 @@ class FIXParser:
             print(msg.msg_type, msg.sender, msg.target)
     """
 
-    def __init__(self, strict: bool = True) -> None:
+    def __init__(self, config: ParserConfig | None = None) -> None:
         self._buffer = bytearray()
-        self._strict = strict  # Enable strict validation
+        self.config = config if config is not None else ParserConfig()
 
     @property
     def strict(self) -> bool:
         """Get strict mode status."""
-        return self._strict
+        return self.config.strict
 
     @strict.setter
     def strict(self, value: bool) -> None:
         """Set strict mode status."""
-        self._strict = value
+        self.config.strict = value
 
     def parse(self, data: bytes) -> list[FIXMessage]:
         """Parse raw data into FIX messages.
@@ -101,7 +106,7 @@ class FIXParser:
         """
         # Check for invalid BeginString (8=non-FIX)
         if len(self._buffer) > 3 and self._buffer[:2] == b"8=":
-            if self._strict:
+            if self.config.strict:
                 begin_string = self._buffer.split(SOH.encode())[0].decode(errors="replace")
                 raise FIXParseError(
                     f"Invalid BeginString: {begin_string}",
@@ -141,6 +146,10 @@ class FIXParser:
         # Checksum is 3 digits followed by SOH
         end = self._find_message_end()
         if end == -1:
+            # Still incomplete. If the pending bytes already exceed the cap,
+            # no terminator can ever make this a valid message.
+            if len(self._buffer) > self.config.max_message_size:
+                self._reject_oversized()
             return None
 
         # Extract complete message
@@ -148,14 +157,35 @@ class FIXParser:
         raw_msg = bytes(self._buffer[:end])
         self._buffer = self._buffer[end:]
 
+        if len(raw_msg) > self.config.max_message_size:
+            self._reject_oversized()
+            return None
+
         # Parse the message
         try:
             return self._parse_message(raw_msg)
         except FIXParseError as e:
-            if self._strict:
+            if self.config.strict:
                 raise
             logger.warning("parse.error", error=str(e), raw=raw_msg[:100])
             return None
+
+    def _reject_oversized(self) -> None:
+        """Discard the buffer and reject a message that exceeds the cap.
+
+        Raises in strict mode; in non-strict mode the pending bytes are
+        dropped, since a hostile or corrupt stream cannot be resynced from
+        inside an oversized blob.
+        """
+        size = len(self._buffer)
+        max_size = self.config.max_message_size
+        if self.config.strict:
+            raise FIXParseError(
+                f"Message exceeds maximum size: {size} > {max_size}",
+                raw=bytes(self._buffer[:100]),
+            )
+        logger.warning("parser.message_too_large", size=size, max=max_size)
+        self._buffer.clear()
 
     def _handle_special_tag(self, tag: int, value: str, msg: FIXMessage, raw: bytes) -> tuple[int, bool] | None:
         """Handle special tags (BeginString, BodyLength, CheckSum).
@@ -305,7 +335,7 @@ class FIXParser:
 
             # Parse tag=value
             if "=" not in field:
-                if self._strict:
+                if self.config.strict:
                     raise FIXParseError(
                         f"Invalid field format: {field}",
                         raw=raw
@@ -316,7 +346,7 @@ class FIXParser:
                 tag_str, value = field.split("=", 1)
                 tag = int(tag_str)
             except ValueError as err:
-                if self._strict:
+                if self.config.strict:
                     raise FIXParseError(
                         f"Invalid field: {field!r}",
                         raw=raw
@@ -325,7 +355,7 @@ class FIXParser:
 
             # Validate tag count
             tag_count += 1
-            if tag_count > MAX_TAGS_PER_MESSAGE:
+            if tag_count > self.config.max_tags_per_message:
                 raise FIXParseError(
                     f"Too many tags: {tag_count}",
                     raw=raw
@@ -345,7 +375,7 @@ class FIXParser:
             raise FIXParseError("Empty message", raw=raw)
 
         # Validate required tags
-        if self._strict:
+        if self.config.strict:
             self._validate_required_tags(msg, raw)
 
         return msg
@@ -370,7 +400,7 @@ class FIXParser:
         # Find position of 10=
         idx = raw.rfind(b"10=")
         if idx == -1:
-            if self._strict:
+            if self.config.strict:
                 raise FIXParseError("No checksum tag found", raw=raw)
             logger.warning("parser.no_checksum", raw=raw[:50])
             return False
@@ -382,13 +412,13 @@ class FIXParser:
         try:
             extracted = int(raw[idx + 3:idx + 6])
         except (ValueError, IndexError):
-            if self._strict:
+            if self.config.strict:
                 raise FIXParseError("Invalid checksum format", raw=raw, tag=10) from None
             logger.warning("parser.invalid_checksum_format", raw=raw[:50])
             return False
 
         if calculated != extracted:
-            if self._strict:
+            if self.config.strict:
                 raise FIXParseError(
                     f"Checksum mismatch: calculated={calculated}, expected={extracted}",
                     raw=raw,
