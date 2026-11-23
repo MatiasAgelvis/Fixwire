@@ -78,6 +78,26 @@ Logout paths. Covered by `TestFIXSessionRunnerTeardown` in
 heartbeat task alongside `check_peer_liveness()`. Covered by
 `TestFIXSessionHeartbeatSend` and `test_heartbeat_loop_sends_idle_heartbeat`.
 
+## Session API Guards
+
+### [ ] Refuse application messages when not logged on
+
+**Problem:** `FIXSession.send()` accepts any message in any state and parks
+it in `_send_queue`. A `NewOrderSingle` submitted while DISCONNECTED sits
+there holding a sequence number, and then has to be either flushed onto the
+next connection — invalid, because it would precede the Logon — or
+discarded, which is silent loss. This is how leftover queues accumulate in
+the first place; `reconnect()` currently only handles the consequence.
+
+**Fix:** raise when an *application* message is queued while
+`status != LOGGED_ON`. Session-level messages (Logon, Logout, Heartbeat,
+TestRequest, ResendRequest, SequenceReset) stay exempt, since the handshake
+has to work before the session is logged on. The app then learns at
+submission time — the only point at which it can retry or alert.
+
+**Deferred from** the reconnect work: reconnect refuses or discards a
+leftover queue, this prevents one from forming.
+
 ## Test Infrastructure
 
 ### [ ] Centralize test fixtures/builders

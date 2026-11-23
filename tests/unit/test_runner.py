@@ -10,7 +10,7 @@ from fixwire.core.factory import FIXMessageFactory
 from fixwire.core.session import FIXSession, SessionConfig, SessionStatus
 from fixwire.core.tags import MsgType
 from fixwire.core.time import utc_now
-from fixwire.runner import FIXSessionRunner
+from fixwire.runner import FIXSessionRunner, QueuedMessagesError, ReconnectError
 from fixwire.transport import InMemoryTransport
 
 
@@ -189,14 +189,165 @@ class TestFIXSessionRunnerDisconnect:
 
 
 class TestFIXSessionRunnerReconnect:
-    """Test that reconnect() is not yet implemented."""
+    """Reconnect after a drop: refusal rules, backoff, give-up."""
 
     @pytest.mark.asyncio
-    async def test_reconnect_not_implemented(self, engine):
-        """Test that reconnect() raises NotImplementedError."""
+    async def test_refuses_after_explicit_disconnect(self, engine, session):
+        """An explicitly disconnected runner does not resurrect itself."""
+        # Arrange: log out without waiting for a peer that never answers
+        session.config.logout_timeout = 0
+        session.status = SessionStatus.LOGGED_ON
+        await engine.disconnect()
+
         # Act & Assert
-        with pytest.raises(NotImplementedError):
+        with pytest.raises(ReconnectError, match="disconnected"):
             await engine.reconnect()
+
+    @pytest.mark.asyncio
+    async def test_refuses_when_messages_are_still_queued(
+        self, engine, session
+    ):
+        """Queued messages would be lost, so reconnect refuses by default."""
+        # Arrange
+        await session.send(
+            FIXMessageFactory.create_heartbeat("CLIENT", "SERVER", 0)
+        )
+
+        # Act & Assert
+        with pytest.raises(QueuedMessagesError) as exc_info:
+            await engine.reconnect()
+
+        assert exc_info.value.count == 1
+        assert exc_info.value.types == [MsgType.HEARTBEAT]
+        assert session.pending_send_count() == 1  # nothing was dropped
+
+    @pytest.mark.asyncio
+    async def test_discards_queued_messages_when_explicitly_allowed(
+        self, engine, session, transport
+    ):
+        """discard_queued=True drops them and rewinds the seq baseline."""
+        # Arrange
+        session.config.retry_delay = 0
+        session.status = SessionStatus.LOGGED_ON
+        await session.send(
+            FIXMessageFactory.create_heartbeat("CLIENT", "SERVER", 0)
+        )
+        transport.feed(_peer_logon())
+
+        # Act
+        await engine.reconnect(discard_queued=True)
+
+        # Assert: queue gone, and the Logon reuses seq 1 (no phantom gap)
+        assert session.pending_send_count() == 0
+        assert b"35=A\x01" in transport.sent[0]
+        assert b"34=1\x01" in transport.sent[0]
+
+    @pytest.mark.asyncio
+    async def test_retries_until_an_attempt_succeeds(
+        self, engine, session, transport
+    ):
+        """Failed attempts are retried; the first success ends the loop."""
+        # Arrange: fail twice, then behave like a real transport
+        session.config.retry_delay = 0
+        real_connect = transport.connect
+
+        async def flaky() -> None:
+            if transport.connect.await_count < 3:
+                raise ConnectionError("peer unreachable")
+            await real_connect()
+
+        transport.connect = AsyncMock(side_effect=flaky)
+        transport.feed(_peer_logon())
+
+        # Act
+        await engine.reconnect()
+
+        # Assert
+        assert transport.connect.await_count == 3
+        assert session.status == SessionStatus.LOGGED_ON
+
+    @pytest.mark.asyncio
+    async def test_gives_up_in_error_after_max_retries(
+        self, engine, session, transport
+    ):
+        """Exhausting the retries parks the session in ERROR and raises."""
+        # Arrange
+        session.config.max_retries = 2
+        session.config.retry_delay = 0
+        transport.connect = AsyncMock(side_effect=ConnectionError("down"))
+
+        # Act & Assert
+        with pytest.raises(ReconnectError, match="2 attempts"):
+            await engine.reconnect()
+
+        assert transport.connect.await_count == 2
+        assert session.status == SessionStatus.ERROR
+
+    def test_backoff_delay_doubles_per_attempt(self, engine, session):
+        """Full jitter, so each delay falls inside a doubling cap."""
+        # Arrange
+        session.config.retry_delay = 1.0
+
+        # Act & Assert
+        assert 0.0 <= engine._backoff_delay(1) <= 1.0
+        assert 0.0 <= engine._backoff_delay(2) <= 2.0
+        assert 0.0 <= engine._backoff_delay(3) <= 4.0
+
+    @pytest.mark.asyncio
+    async def test_preserves_sequence_numbers_across_reconnect(
+        self, engine, session, transport
+    ):
+        """Sequence numbers continue; a reconnect must not restart them."""
+        # Arrange
+        session.config.retry_delay = 0
+        session._state.outgoing_seq_num = 42
+        transport.feed(_peer_logon())
+
+        # Act
+        await engine.reconnect()
+
+        # Assert: the Logon carries the next number in sequence
+        assert b"34=43\x01" in transport.sent[0]
+
+    @pytest.mark.asyncio
+    async def test_reconnects_after_a_dropped_session(
+        self, engine, session, transport
+    ):
+        """A session killed by a task error can be brought back up.
+
+        The failing writer leaves ``_writer_task`` populated, so a naive
+        ``connect()`` would short-circuit as "already running" and report a
+        reconnect that never happened.
+        """
+        # Arrange: log on, then let the wire die under the writer
+        session.config.retry_delay = 0
+        session.config.logon_timeout = 0.5
+        transport.feed(_peer_logon())
+        await engine.connect()
+
+        real_send = transport.send
+        transport.send = AsyncMock(side_effect=ConnectionError("wire died"))
+        await session.send(
+            FIXMessageFactory.create_heartbeat("CLIENT", "SERVER", 0)
+        )
+        await _wait_until(
+            lambda: session.status == SessionStatus.ERROR, timeout=2.0
+        )
+
+        # Act: restore the wire, reconnect, then answer the new Logon.
+        # Feeding earlier would let the dying reader consume it.
+        transport.send = real_send
+        reconnect = asyncio.create_task(engine.reconnect())
+        await _wait_until(
+            lambda: session.status == SessionStatus.WAITING_LOGON, timeout=2.0
+        )
+        transport.feed(_peer_logon())
+        await asyncio.wait_for(reconnect, timeout=2.0)
+
+        # Assert
+        assert session.status == SessionStatus.LOGGED_ON
+        assert engine._writer_task is not None
+        assert not engine._writer_task.done()
 
 
 class TestFIXSessionRunnerConnect:
@@ -907,6 +1058,13 @@ async def _drain_reader(engine: FIXSessionRunner, turns: int = 4) -> None:
     """
     for _ in range(turns):
         await asyncio.sleep(0)
+
+
+def _peer_logon(seq: int = 1) -> bytes:
+    """Serialized Logon from the server, for driving the handshake."""
+    return FIXMessageFactory.create_logon(
+        sender="SERVER", target="CLIENT", seq=seq
+    ).serialize()
 
 
 async def _wait_for_sent(

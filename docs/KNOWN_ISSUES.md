@@ -48,6 +48,19 @@
 - [ ] GapFill handling
 - [ ] Sequence number synchronization
 
+### Outbound
+- [ ] Losing the in-flight message on send failure
+
+  `_writer_loop` does `queue.get()` → `serialize()` → `transport.send()`.
+  If `send()` raises, the message is already out of the queue and is
+  dropped: its sequence number is consumed, nothing is recorded, and it is
+  not requeued. The peer sees a gap and asks for it; with no store we
+  answer with a GapFill, telling the peer the message never existed.
+
+  Requeueing it is not a fix — if the send actually landed, requeueing
+  sends it twice. Resolve together with the M3 outbox: persist before the
+  wire, replay after logon, serve ResendRequest from the store.
+
 ## Transport
 
 ### WebSocket

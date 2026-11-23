@@ -9,6 +9,7 @@ session in ERROR and closes the transport.
 from __future__ import annotations
 
 import asyncio
+import random
 
 import structlog
 
@@ -16,6 +17,27 @@ from fixwire.core.session import FIXSession, SessionStatus
 from fixwire.transport import Transport
 
 logger = structlog.get_logger()
+
+
+class ReconnectError(RuntimeError):
+    """Reconnect was refused, or exhausted its attempts."""
+
+
+class QueuedMessagesError(ReconnectError):
+    """Outbound messages are still queued and would be lost.
+
+    Nothing is dropped when this is raised. Call ``reconnect()`` with
+    ``discard_queued=True`` to accept the loss, or drain the queue and
+    resubmit the messages yourself.
+    """
+
+    def __init__(self, count: int, types: list[str]) -> None:
+        self.count = count
+        self.types = types
+        super().__init__(
+            f"{count} outbound message(s) still queued (types={types}); "
+            "pass discard_queued=True to drop them"
+        )
 
 
 # How long the writer sleeps when the session queue is empty before
@@ -417,9 +439,84 @@ class FIXSessionRunner:
             logger.warning("runner.close_after_error_failed",
                            error=str(close_error))
 
-    async def reconnect(self) -> None:
-        """Reconnect with backoff."""
-        raise NotImplementedError
+    async def reconnect(self, *, discard_queued: bool = False) -> None:
+        """Re-establish the session after a drop, retrying with backoff.
+
+        Makes up to ``session.config.max_retries`` attempts (minimum one),
+        sleeping ``retry_delay`` doubling per attempt with full jitter
+        between them. On exhaustion the session is parked in ``ERROR`` and
+        ``ReconnectError`` is raised.
+
+        Refuses when there is nothing to reconnect to, or when doing so
+        would silently lose data:
+
+        - After ``disconnect()`` the runner stays closed.
+        - A non-empty send queue raises ``QueuedMessagesError`` unless
+          ``discard_queued=True``. Those messages cannot be flushed onto
+          the new connection (they would precede the Logon) and dropping
+          them silently would make the peer gap-fill away orders that were
+          never sent.
+
+        Args:
+            discard_queued: Drop queued outbound messages instead of
+                refusing. They are logged and their sequence numbers are
+                reused, so no gap is created.
+
+        Raises:
+            ReconnectError: The runner is closed, or every attempt failed.
+            QueuedMessagesError: Messages were queued and
+                ``discard_queued`` is False.
+        """
+        if self._closed:
+            raise ReconnectError(
+                "Runner was explicitly disconnected; reconnect refused"
+            )
+
+        pending = self._session.peek_pending_send()
+        if pending and not discard_queued:
+            raise QueuedMessagesError(
+                len(pending), [m.msg_type for m in pending]
+            )
+        if pending:
+            discarded = self._session.discard_pending_send()
+            logger.warning(
+                "runner.discarded_on_reconnect",
+                count=len(discarded),
+                types=[m.msg_type for m in discarded],
+            )
+
+        # Clear any tasks left behind by the failed session: connect() is a
+        # no-op while _writer_task is set, which would report a reconnect
+        # that never happened.
+        await self.stop()
+
+        attempts = max(1, self._session.config.max_retries)
+        last_error: Exception | None = None
+        for attempt in range(1, attempts + 1):
+            if attempt > 1:
+                await asyncio.sleep(self._backoff_delay(attempt - 1))
+            try:
+                await self.connect()
+            except Exception as e:
+                last_error = e
+                logger.warning(
+                    "runner.reconnect_attempt_failed",
+                    attempt=attempt,
+                    error=str(e),
+                )
+                continue
+            logger.info("runner.reconnected", attempt=attempt)
+            return
+
+        self._session.status = SessionStatus.ERROR
+        raise ReconnectError(
+            f"Reconnect failed after {attempts} attempts"
+        ) from last_error
+
+    def _backoff_delay(self, attempt: int) -> float:
+        """Full-jitter exponential backoff for a 1-based ``attempt``."""
+        cap = self._session.config.retry_delay * (2 ** (attempt - 1))
+        return random.uniform(0, cap)
 
     # --- Introspection ---
 
