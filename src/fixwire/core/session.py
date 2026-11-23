@@ -545,20 +545,43 @@ class FIXSession:
                       text=text)
 
     async def _handle_sequence_reset(self, msg: FIXMessage) -> None:
-        """Handle SequenceReset message."""
-        new_seq = msg.new_sequence_number
-        gap_fill = msg.gap_fill_flag
+        """Handle SequenceReset.
 
-        if gap_fill:
-            # GapFill - skip messages
+        The two forms differ per FIX 4.4:
+
+        - GapFill (123=Y) may only advance. A stale GapFill is ignored:
+          applying it would rewind the incoming sequence and make the next
+          real message look like a gap.
+        - Reset (123=N) is unconditional and may move backwards, which is
+          what makes it usable for administrative recovery.
+
+        ``NewSeqNo`` defaults to 0 when tag 36 is missing or malformed, so
+        a non-positive value is treated as a malformed message and dropped
+        rather than zeroing the baseline.
+        """
+        new_seq = msg.new_sequence_number
+
+        if new_seq <= 0:
+            logger.warning("session.sequence_reset_malformed",
+                           gap_fill=msg.gap_fill_flag,
+                           new_seq_no=new_seq)
+            return
+
+        if msg.gap_fill_flag:
+            expected = self.get_next_expected_seq_num()
+            if new_seq <= expected:
+                logger.warning("session.gap_fill_stale",
+                               expected=expected,
+                               new_seq_no=new_seq)
+                return
             self._state.incoming_seq_num = new_seq - 1
             logger.info("session.gap_fill",
                        new_seq=new_seq)
-        else:
-            # SequenceReset - reset to new value
-            self._state.incoming_seq_num = new_seq - 1
-            logger.info("session.sequence_reset",
-                       new_seq=new_seq)
+            return
+
+        self._state.incoming_seq_num = new_seq - 1
+        logger.info("session.sequence_reset",
+                   new_seq=new_seq)
 
     async def connect(self) -> None:
         """Initiate session connection and logon.
