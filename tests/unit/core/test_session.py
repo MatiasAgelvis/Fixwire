@@ -53,6 +53,14 @@ class TestFIXSessionCreation:
         assert session.parser.strict is False
         assert session.parser.config.max_message_size == 2048
 
+    def test_default_callback_queue_size(self):
+        """The callback queue bound is pinned: unbounded is not the default."""
+        # Arrange & Act
+        config = SessionConfig(sender_comp_id="CLIENT", target_comp_id="SERVER")
+
+        # Assert
+        assert config.callback_queue_size == 10_000
+
 
 class TestFIXSessionPurity:
     """FIXSession is a pure protocol layer: no transport, no asyncio tasks."""
