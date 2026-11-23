@@ -10,9 +10,12 @@ from __future__ import annotations
 
 import asyncio
 import random
+from collections.abc import Awaitable
+from typing import TypeVar
 
 import structlog
 
+from fixwire.core.message import FIXMessage
 from fixwire.core.session import FIXSession, SessionStatus
 from fixwire.transport import Transport
 
@@ -51,6 +54,25 @@ _IDLE_POLL = 0.05
 # ERROR teardown latency.
 _HEARTBEAT_POLL = 1.0
 
+_T = TypeVar("_T")
+
+
+async def _poll(awaitable: Awaitable[_T], timeout: float) -> _T | None:
+    """Await with a poll timeout, never swallowing cancellation.
+
+    ``asyncio.wait_for`` can surface a task cancellation as ``TimeoutError``
+    when it races with the timeout expiring. Treating that as an ordinary
+    tick would leave the task unable to stop, which hangs loop teardown, so
+    a pending cancellation is re-raised. Returns None when the poll timed out.
+    """
+    try:
+        return await asyncio.wait_for(awaitable, timeout=timeout)
+    except TimeoutError:
+        task = asyncio.current_task()
+        if task is not None and task.cancelling():
+            raise asyncio.CancelledError() from None
+        return None
+
 
 class FIXSessionRunner:
     """Runs one FIXSession over one Transport.
@@ -72,6 +94,10 @@ class FIXSessionRunner:
         self._writer_task: asyncio.Task[None] | None = None
         self._reader_task: asyncio.Task[None] | None = None
         self._heartbeat_task: asyncio.Task[None] | None = None
+        self._callback_task: asyncio.Task[None] | None = None
+        self._callback_queue: asyncio.Queue[FIXMessage] = asyncio.Queue(
+            maxsize=session.config.callback_queue_size
+        )
         self._heartbeat_poll = _HEARTBEAT_POLL
         self._stop_event = asyncio.Event()
 
@@ -230,6 +256,10 @@ class FIXSessionRunner:
         self._heartbeat_task = asyncio.create_task(
             self._heartbeat_loop(), name="fixwire-runner-heartbeat"
         )
+        self._session.set_callback_dispatcher(self._dispatch_to_callbacks)
+        self._callback_task = asyncio.create_task(
+            self._callback_loop(), name="fixwire-runner-callbacks"
+        )
 
     async def stop(self) -> None:
         """Signal I/O tasks to stop and wait for them. Idempotent.
@@ -244,14 +274,17 @@ class FIXSessionRunner:
             self._writer_task is None
             and self._reader_task is None
             and self._heartbeat_task is None
+            and self._callback_task is None
         ):
             return
         self._stop_event.set()
-        # Reader and heartbeat exit on their own polls; the writer drains
-        # the queue. Only then do we cut the wire.
+        # Reader and heartbeat exit on their own polls; the writer and the
+        # callback task drain their queues. Only then do we cut the wire.
         await self._await_task(self._reader_task, timeout=1.0)
         await self._await_task(self._heartbeat_task, timeout=1.0)
         await self._await_task(self._writer_task, timeout=1.0)
+        await self._await_task(self._callback_task, timeout=1.0)
+        self._session.set_callback_dispatcher(None)
         try:
             await self._transport.close()
         except Exception:
@@ -259,6 +292,7 @@ class FIXSessionRunner:
         self._writer_task = None
         self._reader_task = None
         self._heartbeat_task = None
+        self._callback_task = None
 
     async def _await_task(
         self, task: asyncio.Task[None] | None, timeout: float
@@ -321,9 +355,8 @@ class FIXSessionRunner:
             # so a Logout queued just before teardown still reaches the peer.
             if self._stop_event.is_set() and queue.empty():
                 return
-            try:
-                msg = await asyncio.wait_for(queue.get(), timeout=_IDLE_POLL)
-            except TimeoutError:
+            msg = await _poll(queue.get(), _IDLE_POLL)
+            if msg is None:
                 continue
             try:
                 data = msg.serialize()
@@ -377,12 +410,7 @@ class FIXSessionRunner:
 
             # Sleep until the next tick, but wake immediately on shutdown so
             # stop() is not delayed by a full poll interval.
-            try:
-                await asyncio.wait_for(
-                    self._stop_event.wait(), timeout=self._heartbeat_poll
-                )
-            except TimeoutError:
-                pass
+            await _poll(self._stop_event.wait(), self._heartbeat_poll)
 
     async def _reader_loop(self) -> None:
         """Drain transport.receive(), feed session.receive().
@@ -395,10 +423,11 @@ class FIXSessionRunner:
         """
         while not self._stop_event.is_set():
             try:
-                data = await asyncio.wait_for(
-                    self._transport.receive(),
-                    timeout=_IDLE_POLL,
+                data = await _poll(
+                    self._transport.receive(), _IDLE_POLL
                 )
+                if data is None:
+                    continue
                 await self._session.receive(data)
                 # A message handler may have moved the session to ERROR
                 # (rejected logon, too-low sequence). React immediately
@@ -406,11 +435,50 @@ class FIXSessionRunner:
                 if self._session.status == SessionStatus.ERROR:
                     await self._teardown_on_error()
                     return
-            except TimeoutError:
-                continue
             except Exception as e:
                 await self._handle_task_error("reader", e)
                 return
+
+    def _dispatch_to_callbacks(self, msg: FIXMessage) -> None:
+        """Hand a message to the callback task. Never blocks.
+
+        Overflow is fatal: the application is not draining callbacks, and
+        dropping messages silently would leave it with a wrong view of its
+        orders. The exception propagates to the reader, which moves the
+        session to ERROR and tears it down.
+
+        Raises:
+            asyncio.QueueFull: ``callback_queue_size`` messages are already
+                waiting for the application.
+        """
+        try:
+            self._callback_queue.put_nowait(msg)
+        except asyncio.QueueFull:
+            logger.error(
+                "runner.callback_queue_full",
+                depth=self._callback_queue.qsize(),
+                max=self._callback_queue.maxsize,
+                sender=self._session.config.sender_comp_id,
+                target=self._session.config.target_comp_id,
+            )
+            raise
+
+    async def _callback_loop(self) -> None:
+        """Run application callbacks in order, off the receive path.
+
+        A slow callback blocks this task, not the session: heartbeats and
+        TestRequest responses keep flowing. Exits when shutdown is signalled
+        *and* the queue is empty, so events already received are delivered
+        before the runner goes away.
+        """
+        queue = self._callback_queue
+        while True:
+            if self._stop_event.is_set() and queue.empty():
+                return
+            msg = await _poll(queue.get(), _IDLE_POLL)
+            if msg is None:
+                continue
+            await self._session.notify_callbacks(msg)
 
     async def _handle_task_error(self, task_name: str, error: Exception) -> None:
         """Mark the session as ERROR, signal shutdown, and close the
@@ -519,6 +587,11 @@ class FIXSessionRunner:
         return random.uniform(0, cap)
 
     # --- Introspection ---
+
+    @property
+    def callback_queue_depth(self) -> int:
+        """Messages waiting for the application callback task."""
+        return self._callback_queue.qsize()
 
     @property
     def status(self) -> SessionStatus:

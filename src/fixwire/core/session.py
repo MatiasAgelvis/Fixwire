@@ -68,6 +68,9 @@ class SessionConfig:
     max_retries: int = 3
     retry_delay: float = 1.0
     parser: ParserConfig = field(default_factory=ParserConfig)
+    # Bounds the queue feeding application callbacks. Overflow is fatal
+    # (see FIXSessionRunner._dispatch_to_callbacks): 0 means unbounded.
+    callback_queue_size: int = 10_000
 
 
 @dataclass
@@ -103,6 +106,7 @@ class FIXSession:
         self._state = _SessionState()
         self._send_queue: asyncio.Queue[FIXMessage] = asyncio.Queue()
         self._receive_callbacks: list[Callable[[FIXMessage], Any]] = []
+        self._callback_dispatcher: Callable[[FIXMessage], None] | None = None
         self._logon_validators: list[Callable[[FIXMessage], bool]] = []
 
     @property
@@ -130,6 +134,40 @@ class FIXSession:
     def on_message(self, callback: Callable[[FIXMessage], Any]) -> None:
         """Register callback for received messages."""
         self._receive_callbacks.append(callback)
+
+    def set_callback_dispatcher(
+        self, dispatcher: Callable[[FIXMessage], None] | None
+    ) -> None:
+        """Route message notifications through ``dispatcher``.
+
+        The dispatcher must not block: it runs on the receive path, so
+        blocking there would stall protocol handling. ``FIXSessionRunner``
+        installs one that enqueues onto a dedicated task, so a slow
+        application callback degrades itself rather than the session.
+
+        With no dispatcher (standalone use), callbacks are awaited inline.
+
+        A dispatcher may raise to signal that the session cannot continue;
+        the exception travels out of ``receive()`` so the caller can tear
+        the session down.
+        """
+        self._callback_dispatcher = dispatcher
+
+    async def notify_callbacks(self, msg: FIXMessage) -> None:
+        """Invoke every registered ``on_message`` callback.
+
+        Called inline when no dispatcher is installed; a dispatcher calls
+        it from whatever task it owns.
+        """
+        for callback in self._receive_callbacks:
+            try:
+                result = callback(msg)
+                if asyncio.iscoroutine(result):
+                    await result
+            except Exception as e:
+                logger.error("session.callback_error",
+                           error=str(e),
+                           msg_type=msg.msg_type)
 
     def on_logon_request(self, validator: Callable[[FIXMessage], bool]) -> None:
         """Register a validator consulted before accepting an inbound Logon.
@@ -265,16 +303,12 @@ class FIXSession:
         elif msg_type == MsgType.SEQUENCE_RESET:
             await self._handle_sequence_reset(msg)
 
-        # Notify callbacks
-        for callback in self._receive_callbacks:
-            try:
-                result = callback(msg)
-                if asyncio.iscoroutine(result):
-                    await result
-            except Exception as e:
-                logger.error("session.callback_error",
-                           error=str(e),
-                           msg_type=msg_type)
+        # Hand the message to the application. A dispatcher (installed by
+        # the runner) keeps slow callbacks off the receive path.
+        if self._callback_dispatcher is not None:
+            self._callback_dispatcher(msg)
+        else:
+            await self.notify_callbacks(msg)
 
     async def _check_incoming_sequence(self, msg: FIXMessage) -> bool:
         """Verify MsgSeqNum (34) against the expected next incoming number.
