@@ -68,6 +68,9 @@ class SessionConfig:
     max_retries: int = 3
     retry_delay: float = 1.0
     parser: ParserConfig = field(default_factory=ParserConfig)
+    # Bounds the queue feeding application callbacks. Overflow is fatal
+    # (see FIXSessionRunner._dispatch_to_callbacks): 0 means unbounded.
+    callback_queue_size: int = 10_000
 
 
 @dataclass
@@ -143,6 +146,10 @@ class FIXSession:
         application callback degrades itself rather than the session.
 
         With no dispatcher (standalone use), callbacks are awaited inline.
+
+        A dispatcher may raise to signal that the session cannot continue;
+        the exception travels out of ``receive()`` so the caller can tear
+        the session down.
         """
         self._callback_dispatcher = dispatcher
 
