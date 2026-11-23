@@ -33,6 +33,29 @@ class SessionStatus(StrEnum):
     ERROR = "error"
 
 
+class SessionNotLoggedOnError(RuntimeError):
+    """An application message was queued while the session is not logged on.
+
+    Application traffic is only accepted on a live session. A message
+    parked on a dead session would either have to be flushed onto the next
+    connection — invalid, because it would precede the Logon — or dropped,
+    which loses it silently.
+    """
+
+
+# Session-level messages belong to session management and may be queued in
+# any state: the handshake has to work before the session is logged on.
+_SESSION_LEVEL_MSG_TYPES: frozenset[MsgType] = frozenset({
+    MsgType.LOGON,
+    MsgType.LOGOUT,
+    MsgType.HEARTBEAT,
+    MsgType.TEST_REQUEST,
+    MsgType.RESEND_REQUEST,
+    MsgType.SEQUENCE_RESET,
+    MsgType.REJECT,
+})
+
+
 @dataclass
 class SessionConfig:
     """FIX Session Configuration."""
@@ -127,7 +150,22 @@ class FIXSession:
 
         Args:
             msg: Message to send (seq num and timestamps will be set automatically).
+
+        Raises:
+            SessionNotLoggedOnError: An application message was queued while
+                the session is not logged on. Session-level messages are
+                exempt so the handshake can run.
         """
+        if (
+            self.status != SessionStatus.LOGGED_ON
+            and msg.msg_type not in _SESSION_LEVEL_MSG_TYPES
+        ):
+            raise SessionNotLoggedOnError(
+                f"Cannot send {msg.msg_type!r} while session is "
+                f"{self.status.value}: only session-level messages are "
+                "allowed before logon"
+            )
+
         # Set session fields
         msg.sender = self.config.sender_comp_id
         msg.target = self.config.target_comp_id
