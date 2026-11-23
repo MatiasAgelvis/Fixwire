@@ -96,7 +96,7 @@ class FIXSessionRunner:
         self._heartbeat_task: asyncio.Task[None] | None = None
         self._callback_task: asyncio.Task[None] | None = None
         self._callback_queue: asyncio.Queue[FIXMessage] = asyncio.Queue(
-            maxsize=session.config.callback_queue_size
+            maxsize=session.config.callback_queue_size or 0
         )
         self._heartbeat_poll = _HEARTBEAT_POLL
         self._stop_event = asyncio.Event()
