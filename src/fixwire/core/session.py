@@ -43,6 +43,16 @@ class SessionNotLoggedOnError(RuntimeError):
     """
 
 
+class SessionQueueFullError(RuntimeError):
+    """The outbound queue is full, so the message was not accepted.
+
+    Raised instead of blocking: ``send()`` is also called from the reader
+    and heartbeat tasks, so waiting would let an application backlog starve
+    protocol traffic. The transport is not draining, which means the
+    session cannot keep its half of the wire.
+    """
+
+
 # Session-level messages belong to session management and may be queued in
 # any state: the handshake has to work before the session is logged on.
 _SESSION_LEVEL_MSG_TYPES: frozenset[MsgType] = frozenset({
@@ -68,9 +78,27 @@ class SessionConfig:
     max_retries: int = 3
     retry_delay: float = 1.0
     parser: ParserConfig = field(default_factory=ParserConfig)
-    # Bounds the queue feeding application callbacks. Overflow is fatal
-    # (see FIXSessionRunner._dispatch_to_callbacks): 0 means unbounded.
-    callback_queue_size: int = 10_000
+    # Bounds the queue feeding application callbacks. None means unbounded;
+    # 0 and negative are rejected in __post_init__.
+    callback_queue_size: int | None = 10_000
+    # Bounds the outbound queue. Overflow raises SessionQueueFullError rather
+    # than blocking. None means unbounded; 0 and negative are rejected.
+    send_queue_size: int | None = 10_000
+
+    def __post_init__(self) -> None:
+        """Reject queue bounds that would silently mean unbounded.
+
+        ``asyncio.Queue(maxsize=0)`` is infinite, so a zero bound would
+        disable the limit instead of enforcing it. Unbounded must be written
+        as ``None`` so it is a deliberate choice.
+        """
+        for name in ("callback_queue_size", "send_queue_size"):
+            value = getattr(self, name)
+            if value is not None and value < 1:
+                raise ValueError(
+                    f"{name} must be a positive int or None (unbounded); "
+                    f"got {value!r}"
+                )
 
 
 @dataclass
@@ -104,7 +132,9 @@ class FIXSession:
         self.parser = FIXParser(config.parser)
         self.factory = FIXMessageFactory()
         self._state = _SessionState()
-        self._send_queue: asyncio.Queue[FIXMessage] = asyncio.Queue()
+        self._send_queue: asyncio.Queue[FIXMessage] = asyncio.Queue(
+            maxsize=config.send_queue_size or 0
+        )
         self._receive_callbacks: list[Callable[[FIXMessage], Any]] = []
         self._callback_dispatcher: Callable[[FIXMessage], None] | None = None
         self._logon_validators: list[Callable[[FIXMessage], bool]] = []
@@ -193,6 +223,8 @@ class FIXSession:
             SessionNotLoggedOnError: An application message was queued while
                 the session is not logged on. Session-level messages are
                 exempt so the handshake can run.
+            SessionQueueFullError: The outbound queue is full. The sequence
+                number has not been consumed.
         """
         if (
             self.status != SessionStatus.LOGGED_ON
@@ -204,14 +236,21 @@ class FIXSession:
                 "allowed before logon"
             )
 
+        if self._send_queue.full():
+            raise SessionQueueFullError(
+                f"Outbound queue is full ({self._send_queue.maxsize}); "
+                "the transport is not draining"
+            )
+
         # Set session fields
         msg.sender = self.config.sender_comp_id
         msg.target = self.config.target_comp_id
         msg.sequence = self._next_seq_num()
         msg.sending_time = utc_now()
 
-        # Serialize and queue for sending
-        await self._send_queue.put(msg)
+        # Serialize and queue for sending. Safe without awaiting: nothing
+        # can interleave between the capacity check and this call.
+        self._send_queue.put_nowait(msg)
 
         self._state.last_sent_time = utc_now()
         logger.debug("session.message_sent",

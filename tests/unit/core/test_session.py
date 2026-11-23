@@ -13,6 +13,7 @@ from fixwire.core.session import (
     FIXSession,
     SessionConfig,
     SessionNotLoggedOnError,
+    SessionQueueFullError,
     SessionStatus,
 )
 from fixwire.core.tags import MsgType
@@ -1040,3 +1041,100 @@ class TestFIXSessionCallbackDispatch:
 
         # Assert
         assert dispatched == []
+
+
+class TestFIXSessionSendQueue:
+    """The outbound queue is bounded: overflow raises instead of growing.
+
+    Blocking is not an option: ``send()`` is called from the reader and
+    heartbeat tasks too, so a full queue must fail fast rather than let an
+    application backlog starve protocol traffic.
+    """
+
+    @staticmethod
+    def _config(**overrides) -> SessionConfig:
+        return SessionConfig(
+            sender_comp_id="CLIENT", target_comp_id="SERVER", **overrides
+        )
+
+    @pytest.mark.asyncio
+    async def test_send_raises_when_the_queue_is_full(self):
+        """A full queue is an error, not an unbounded buffer."""
+        # Arrange
+        session = FIXSession(self._config(send_queue_size=1))
+        session.status = SessionStatus.LOGGED_ON
+        await session.send(
+            FIXMessageFactory.create_heartbeat("CLIENT", "SERVER", 0)
+        )
+
+        # Act & Assert
+        with pytest.raises(SessionQueueFullError):
+            await session.send(
+                FIXMessageFactory.create_heartbeat("CLIENT", "SERVER", 0)
+            )
+
+    @pytest.mark.asyncio
+    async def test_overflow_consumes_no_sequence_number(self):
+        """A refused message must not leave a hole in the outgoing seq."""
+        # Arrange
+        session = FIXSession(self._config(send_queue_size=1))
+        session.status = SessionStatus.LOGGED_ON
+        await session.send(
+            FIXMessageFactory.create_heartbeat("CLIENT", "SERVER", 0)
+        )
+        seq_before = session.get_next_send_seq_num()
+
+        # Act
+        with pytest.raises(SessionQueueFullError):
+            await session.send(
+                FIXMessageFactory.create_heartbeat("CLIENT", "SERVER", 0)
+            )
+
+        # Assert
+        assert session.get_next_send_seq_num() == seq_before
+        assert session.pending_send_count() == 1
+
+    def test_default_send_queue_size(self):
+        """The bound is pinned: unbounded is not the default."""
+        # Arrange & Act
+        config = self._config()
+
+        # Assert
+        assert config.send_queue_size == 10_000
+
+
+class TestFIXSessionConfigValidation:
+    """Queue bounds are validated at construction, not discovered at runtime.
+
+    ``asyncio.Queue(maxsize=0)`` means *unbounded*, so a zero bound would
+    silently disable the limit. Unbounded has to be written as ``None``.
+    """
+
+    @staticmethod
+    def _config(**overrides) -> SessionConfig:
+        return SessionConfig(
+            sender_comp_id="CLIENT", target_comp_id="SERVER", **overrides
+        )
+
+    def test_zero_send_queue_size_is_rejected(self):
+        """A zero bound would mean unlimited, so it is an error."""
+        with pytest.raises(ValueError, match="send_queue_size"):
+            self._config(send_queue_size=0)
+
+    def test_negative_send_queue_size_is_rejected(self):
+        """Negative bounds are nonsense as well as unbounded."""
+        with pytest.raises(ValueError, match="send_queue_size"):
+            self._config(send_queue_size=-1)
+
+    def test_zero_callback_queue_size_is_rejected(self):
+        """Same rule for the callback queue."""
+        with pytest.raises(ValueError, match="callback_queue_size"):
+            self._config(callback_queue_size=0)
+
+    def test_none_means_unbounded(self):
+        """Opting out of the bound is explicit and visible."""
+        # Arrange & Act
+        session = FIXSession(self._config(send_queue_size=None))
+
+        # Assert
+        assert session._send_queue.maxsize == 0
