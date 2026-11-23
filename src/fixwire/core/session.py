@@ -142,6 +142,42 @@ class FIXSession:
                     msg_type=msg.msg_type,
                     seq=msg.sequence)
 
+    def pending_send_count(self) -> int:
+        """Number of outbound messages queued but not yet written."""
+        return self._send_queue.qsize()
+
+    def peek_pending_send(self) -> list[FIXMessage]:
+        """Snapshot of the outbound queue, without consuming it.
+
+        ``asyncio.Queue`` has no non-destructive accessor, so this reads its
+        internal deque. The session owns the queue and callers run on the
+        same event loop, so the snapshot cannot change underneath them.
+        """
+        return list(getattr(self._send_queue, "_queue"))  # noqa: B009
+
+    def discard_pending_send(self) -> list[FIXMessage]:
+        """Drop queued outbound messages and rewind the sequence baseline.
+
+        The messages were never handed to the transport, so their sequence
+        numbers are free to reuse: rewinding stops the peer from seeing a
+        gap that would otherwise have to be gap-filled away.
+
+        Returns:
+            The discarded messages, so the caller can report or resubmit
+            them.
+        """
+        discarded: list[FIXMessage] = []
+        while True:
+            try:
+                discarded.append(self._send_queue.get_nowait())
+            except asyncio.QueueEmpty:
+                break
+        if discarded:
+            self._state.outgoing_seq_num = min(
+                msg.sequence for msg in discarded
+            ) - 1
+        return discarded
+
     async def receive(self, data: bytes) -> list[FIXMessage]:
         """Process received raw data.
 
