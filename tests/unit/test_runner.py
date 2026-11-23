@@ -1190,6 +1190,63 @@ class TestFIXSessionRunnerCallbacks:
         assert seen == [1]
 
     @pytest.mark.asyncio
+    async def test_callback_queue_overflow_errors_the_session(self, transport):
+        """A wedged application fails the session instead of growing memory.
+
+        Dropping messages silently would leave the app with a wrong view of
+        its orders, so overflow is fatal and visible.
+        """
+        # Arrange: a queue of one, and a callback that never returns
+        session = FIXSession(
+            SessionConfig(
+                sender_comp_id="CLIENT",
+                target_comp_id="SERVER",
+                callback_queue_size=1,
+            )
+        )
+        engine = FIXSessionRunner(session, transport)
+        release = asyncio.Event()
+        started = asyncio.Event()
+
+        async def stuck(msg) -> None:
+            started.set()
+            await release.wait()
+
+        session.on_message(stuck)
+        session.status = SessionStatus.LOGGED_ON
+        await engine.start()
+
+        # Act: one message occupies the callback task, the next fills the
+        # queue, and the third has nowhere to go
+        transport.feed(
+            FIXMessageFactory.create_heartbeat(
+                "SERVER", "CLIENT", seq=1
+            ).serialize()
+        )
+        await asyncio.wait_for(started.wait(), timeout=2.0)
+        transport.feed(
+            FIXMessageFactory.create_heartbeat(
+                "SERVER", "CLIENT", seq=2
+            ).serialize()
+        )
+        await _wait_until(lambda: engine.callback_queue_depth == 1, timeout=2.0)
+        transport.feed(
+            FIXMessageFactory.create_heartbeat(
+                "SERVER", "CLIENT", seq=3
+            ).serialize()
+        )
+
+        # Assert: the session fails loudly and the transport is closed
+        await _wait_until(
+            lambda: session.status == SessionStatus.ERROR, timeout=2.0
+        )
+        assert transport.is_connected is False
+
+        # Cleanup
+        release.set()
+        await engine.stop()
+
+    @pytest.mark.asyncio
     async def test_polling_task_does_not_swallow_cancellation(
         self, engine, session, transport
     ):
