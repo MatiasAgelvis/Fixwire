@@ -7,8 +7,14 @@ from datetime import timedelta
 import pytest
 
 from fixwire.core.factory import FIXMessageFactory
+from fixwire.core.message import FIXMessage
 from fixwire.core.parser import ParserConfig
-from fixwire.core.session import FIXSession, SessionConfig, SessionStatus
+from fixwire.core.session import (
+    FIXSession,
+    SessionConfig,
+    SessionNotLoggedOnError,
+    SessionStatus,
+)
 from fixwire.core.tags import MsgType
 from fixwire.core.time import utc_now
 
@@ -257,6 +263,104 @@ class TestFIXSessionPendingOutbound:
         # Assert
         assert discarded == []
         assert session.get_next_send_seq_num() == seq_before
+
+
+class TestFIXSessionSendGuard:
+    """Application traffic is only accepted on a logged-on session.
+
+    A message parked on a dead session either has to be flushed onto the
+    next connection (invalid: it would precede the Logon) or dropped,
+    which loses it silently. Refusing at submission time is the only point
+    where the caller can still react.
+    """
+
+    @staticmethod
+    def _order() -> FIXMessage:
+        """A minimal application message (NewOrderSingle)."""
+        msg = FIXMessage()
+        msg.msg_type = MsgType.NEW_ORDER_SINGLE
+        return msg
+
+    @pytest.mark.asyncio
+    async def test_rejects_application_message_when_disconnected(self, session):
+        """The default state refuses application traffic."""
+        # Act & Assert
+        with pytest.raises(SessionNotLoggedOnError, match="disconnected"):
+            await session.send(self._order())
+
+    @pytest.mark.asyncio
+    async def test_rejected_message_consumes_no_sequence_number(self, session):
+        """A refused message must not leave a hole in the outgoing seq."""
+        # Arrange
+        seq_before = session.get_next_send_seq_num()
+
+        # Act
+        with pytest.raises(SessionNotLoggedOnError):
+            await session.send(self._order())
+
+        # Assert
+        assert session.get_next_send_seq_num() == seq_before
+        assert session.pending_send_count() == 0
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize(
+        "status",
+        [
+            SessionStatus.CONNECTING,
+            SessionStatus.WAITING_LOGON,
+            SessionStatus.WAITING_LOGOUT,
+            SessionStatus.ERROR,
+        ],
+    )
+    async def test_rejects_application_message_in_any_other_state(
+        self, session, status
+    ):
+        """Only LOGGED_ON accepts application traffic."""
+        # Arrange
+        session.status = status
+
+        # Act & Assert
+        with pytest.raises(SessionNotLoggedOnError):
+            await session.send(self._order())
+
+    @pytest.mark.asyncio
+    async def test_accepts_application_message_when_logged_on(self, session):
+        """A live session queues application traffic normally."""
+        # Arrange
+        session.status = SessionStatus.LOGGED_ON
+
+        # Act
+        await session.send(self._order())
+
+        # Assert
+        assert session.pending_send_count() == 1
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize(
+        "msg_type",
+        [
+            MsgType.LOGON,
+            MsgType.LOGOUT,
+            MsgType.HEARTBEAT,
+            MsgType.TEST_REQUEST,
+            MsgType.RESEND_REQUEST,
+            MsgType.SEQUENCE_RESET,
+            MsgType.REJECT,
+        ],
+    )
+    async def test_session_messages_are_allowed_before_logon(
+        self, session, msg_type
+    ):
+        """The handshake must work before the session is logged on."""
+        # Arrange: DISCONNECTED
+        msg = FIXMessage()
+        msg.msg_type = msg_type
+
+        # Act
+        await session.send(msg)
+
+        # Assert
+        assert session.pending_send_count() == 1
 
 
 class TestFIXSessionHeartbeatSend:
