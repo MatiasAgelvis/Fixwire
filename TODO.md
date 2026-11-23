@@ -80,23 +80,14 @@ heartbeat task alongside `check_peer_liveness()`. Covered by
 
 ## Session API Guards
 
-### [ ] Refuse application messages when not logged on
+### [x] Refuse application messages when not logged on
 
-**Problem:** `FIXSession.send()` accepts any message in any state and parks
-it in `_send_queue`. A `NewOrderSingle` submitted while DISCONNECTED sits
-there holding a sequence number, and then has to be either flushed onto the
-next connection — invalid, because it would precede the Logon — or
-discarded, which is silent loss. This is how leftover queues accumulate in
-the first place; `reconnect()` currently only handles the consequence.
-
-**Fix:** raise when an *application* message is queued while
-`status != LOGGED_ON`. Session-level messages (Logon, Logout, Heartbeat,
-TestRequest, ResendRequest, SequenceReset) stay exempt, since the handshake
-has to work before the session is logged on. The app then learns at
-submission time — the only point at which it can retry or alert.
-
-**Deferred from** the reconnect work: reconnect refuses or discards a
-leftover queue, this prevents one from forming.
+**Shipped:** `FIXSession.send()` raises `SessionNotLoggedOnError` for any
+message outside the session-level set (Logon, Logout, Heartbeat,
+TestRequest, ResendRequest, SequenceReset, Reject) unless the session is
+`LOGGED_ON`. The check runs before the sequence number is assigned, so a
+refused message leaves no hole. Covered by `TestFIXSessionSendGuard` in
+`tests/unit/core/test_session.py`.
 
 ## Test Infrastructure
 
