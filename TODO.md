@@ -89,6 +89,19 @@ TestRequest, ResendRequest, SequenceReset, Reject) unless the session is
 refused message leaves no hole. Covered by `TestFIXSessionSendGuard` in
 `tests/unit/core/test_session.py`.
 
+## Backpressure
+
+### [ ] Bound the outbound send queue
+
+`FIXSession._send_queue` is unbounded: if the transport stalls, queued
+outbound messages grow the process without limit.
+
+The callback queue is bounded (`SessionConfig.callback_queue_size`, default
+10,000) and overflow is fatal. Outbound needs its own policy decision,
+because dropping an unsent order is as wrong as dropping an execution.
+Design it together with M3's bounded inbound queue, so both paths share one
+policy and one set of observability hooks.
+
 ## Test Infrastructure
 
 ### [ ] Centralize test fixtures/builders
