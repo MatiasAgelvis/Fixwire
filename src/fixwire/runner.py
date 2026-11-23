@@ -95,7 +95,9 @@ class FIXSessionRunner:
         self._reader_task: asyncio.Task[None] | None = None
         self._heartbeat_task: asyncio.Task[None] | None = None
         self._callback_task: asyncio.Task[None] | None = None
-        self._callback_queue: asyncio.Queue[FIXMessage] = asyncio.Queue()
+        self._callback_queue: asyncio.Queue[FIXMessage] = asyncio.Queue(
+            maxsize=session.config.callback_queue_size
+        )
         self._heartbeat_poll = _HEARTBEAT_POLL
         self._stop_event = asyncio.Event()
 
@@ -254,7 +256,7 @@ class FIXSessionRunner:
         self._heartbeat_task = asyncio.create_task(
             self._heartbeat_loop(), name="fixwire-runner-heartbeat"
         )
-        self._session.set_callback_dispatcher(self._callback_queue.put_nowait)
+        self._session.set_callback_dispatcher(self._dispatch_to_callbacks)
         self._callback_task = asyncio.create_task(
             self._callback_loop(), name="fixwire-runner-callbacks"
         )
@@ -437,6 +439,30 @@ class FIXSessionRunner:
                 await self._handle_task_error("reader", e)
                 return
 
+    def _dispatch_to_callbacks(self, msg: FIXMessage) -> None:
+        """Hand a message to the callback task. Never blocks.
+
+        Overflow is fatal: the application is not draining callbacks, and
+        dropping messages silently would leave it with a wrong view of its
+        orders. The exception propagates to the reader, which moves the
+        session to ERROR and tears it down.
+
+        Raises:
+            asyncio.QueueFull: ``callback_queue_size`` messages are already
+                waiting for the application.
+        """
+        try:
+            self._callback_queue.put_nowait(msg)
+        except asyncio.QueueFull:
+            logger.error(
+                "runner.callback_queue_full",
+                depth=self._callback_queue.qsize(),
+                max=self._callback_queue.maxsize,
+                sender=self._session.config.sender_comp_id,
+                target=self._session.config.target_comp_id,
+            )
+            raise
+
     async def _callback_loop(self) -> None:
         """Run application callbacks in order, off the receive path.
 
@@ -561,6 +587,11 @@ class FIXSessionRunner:
         return random.uniform(0, cap)
 
     # --- Introspection ---
+
+    @property
+    def callback_queue_depth(self) -> int:
+        """Messages waiting for the application callback task."""
+        return self._callback_queue.qsize()
 
     @property
     def status(self) -> SessionStatus:
