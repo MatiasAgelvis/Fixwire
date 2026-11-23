@@ -91,16 +91,29 @@ refused message leaves no hole. Covered by `TestFIXSessionSendGuard` in
 
 ## Backpressure
 
-### [ ] Bound the outbound send queue
+### [x] Bound the outbound send queue
 
-`FIXSession._send_queue` is unbounded: if the transport stalls, queued
-outbound messages grow the process without limit.
+**Shipped:** `SessionConfig.send_queue_size` (default 10,000; `None` means
+unbounded, and `0`/negative are rejected at construction because
+`asyncio.Queue(maxsize=0)` is infinite). `FIXSession.send()` raises
+`SessionQueueFullError` when the queue is full, and checks capacity *before*
+assigning a sequence number, so a refused message leaves no hole. Blocking
+was rejected: `send()` also runs from the reader and heartbeat tasks, and an
+application backlog must not starve protocol traffic. Depth is already
+observable via `pending_send_count()`. Covered by
+`TestFIXSessionSendQueue` and `TestFIXSessionConfigValidation`.
 
-The callback queue is bounded (`SessionConfig.callback_queue_size`, default
-10,000) and overflow is fatal. Outbound needs its own policy decision,
-because dropping an unsent order is as wrong as dropping an execution.
-Design it together with M3's bounded inbound queue, so both paths share one
-policy and one set of observability hooks.
+### [ ] Bounded inbound queue (M3 item, deliberately deferred)
+
+M3 calls for a depth-bounded queue between transport and session, with a
+"block with timeout → ERROR" policy.
+
+Deferred until something slow actually sits behind it. Application
+callbacks now run off the receive path, and protocol handling is
+microsecond work, so the reader returns to `receive()` immediately and
+transport backpressure is already bounding memory for free. Revisit when
+the outbox persists messages before the wire, or with audit logging — that
+is when a queue between transport and session earns its keep.
 
 ## Test Infrastructure
 
