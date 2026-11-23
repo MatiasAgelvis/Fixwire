@@ -1138,3 +1138,99 @@ class TestFIXSessionConfigValidation:
 
         # Assert
         assert session._send_queue.maxsize == 0
+
+
+class TestFIXSessionSequenceResetSemantics:
+    """GapFill may only advance; Reset is unconditional.
+
+    Applying a stale GapFill would rewind the incoming sequence and make
+    the next real message look like a gap, so it must be ignored.
+    """
+
+    @staticmethod
+    def _reset(new_seq_no: int, gap_fill: bool) -> FIXMessage:
+        return FIXMessageFactory.create_sequence_reset(
+            "SERVER", "CLIENT", seq=1, new_seq_no=new_seq_no, gap_fill=gap_fill
+        )
+
+    @pytest.mark.asyncio
+    async def test_gap_fill_advances_when_ahead(self, session):
+        """The normal case: skip forward."""
+        # Arrange: expecting 5
+        session.status = SessionStatus.LOGGED_ON
+        session._state.incoming_seq_num = 4
+
+        # Act
+        await session.receive(self._reset(10, gap_fill=True).serialize())
+
+        # Assert
+        assert session.get_next_expected_seq_num() == 10
+
+    @pytest.mark.asyncio
+    async def test_stale_gap_fill_is_ignored(self, session):
+        """A GapFill below the expected number must not rewind us."""
+        # Arrange: expecting 10
+        session.status = SessionStatus.LOGGED_ON
+        session._state.incoming_seq_num = 9
+
+        # Act
+        await session.receive(self._reset(5, gap_fill=True).serialize())
+
+        # Assert
+        assert session.get_next_expected_seq_num() == 10
+
+    @pytest.mark.asyncio
+    async def test_gap_fill_to_exactly_expected_is_a_noop(self, session):
+        """new_seq == expected changes nothing either way."""
+        # Arrange: expecting 10
+        session.status = SessionStatus.LOGGED_ON
+        session._state.incoming_seq_num = 9
+
+        # Act
+        await session.receive(self._reset(10, gap_fill=True).serialize())
+
+        # Assert
+        assert session.get_next_expected_seq_num() == 10
+
+    @pytest.mark.asyncio
+    async def test_reset_may_move_backwards(self, session):
+        """Reset is the administrative form and is unconditional."""
+        # Arrange: expecting 10
+        session.status = SessionStatus.LOGGED_ON
+        session._state.incoming_seq_num = 9
+
+        # Act
+        await session.receive(self._reset(3, gap_fill=False).serialize())
+
+        # Assert
+        assert session.get_next_expected_seq_num() == 3
+
+    @pytest.mark.asyncio
+    async def test_malformed_reset_is_ignored_by_a_lenient_parser(self):
+        """A SequenceReset without tag 36 must not zero the baseline.
+
+        Strict parsing rejects this message outright; a lenient parser
+        delivers it, and the handler has to cope with NewSeqNo defaulting
+        to 0.
+        """
+        # Arrange
+        session = FIXSession(
+            SessionConfig(
+                sender_comp_id="CLIENT",
+                target_comp_id="SERVER",
+                parser=ParserConfig(strict=False),
+            )
+        )
+        session.status = SessionStatus.LOGGED_ON
+        session._state.incoming_seq_num = 9  # expecting 10
+        msg = FIXMessage()
+        msg.msg_type = MsgType.SEQUENCE_RESET
+        msg.sender = "SERVER"
+        msg.target = "CLIENT"
+        msg.sequence = 1
+
+        # Act
+        await session.receive(msg.serialize())
+
+        # Assert: ignored rather than applied as a negative baseline
+        assert session.get_next_expected_seq_num() == 10
