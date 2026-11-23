@@ -1060,6 +1060,180 @@ async def _drain_reader(engine: FIXSessionRunner, turns: int = 4) -> None:
         await asyncio.sleep(0)
 
 
+class TestFIXSessionRunnerCallbacks:
+    """Application callbacks run off the reader path.
+
+    A slow callback must not stall protocol handling: heartbeats and
+    TestRequest responses keep flowing while the application is busy.
+    """
+
+    @pytest.mark.asyncio
+    async def test_slow_callback_does_not_block_protocol_handling(
+        self, engine, session, transport
+    ):
+        """A TestRequest is answered while a callback is still running."""
+        # Arrange
+        started = asyncio.Event()
+        release = asyncio.Event()
+
+        async def slow(msg) -> None:
+            started.set()
+            await release.wait()
+
+        session.on_message(slow)
+        session.status = SessionStatus.LOGGED_ON
+        await engine.start()
+
+        # Act: the first message occupies the callback task
+        transport.feed(
+            FIXMessageFactory.create_heartbeat(
+                "SERVER", "CLIENT", seq=1
+            ).serialize()
+        )
+        await asyncio.wait_for(started.wait(), timeout=2.0)
+
+        # A TestRequest arrives while the callback is still stuck
+        transport.feed(
+            FIXMessageFactory.create_test_request(
+                "SERVER", "CLIENT", seq=2, test_req_id="PING"
+            ).serialize()
+        )
+
+        # Assert: the Heartbeat answer reaches the wire regardless
+        await _wait_until(
+            lambda: any(
+                b"35=0" in data and b"112=PING" in data
+                for data in transport.sent
+            ),
+            timeout=2.0,
+        )
+
+        # Cleanup
+        release.set()
+        await engine.stop()
+
+    @pytest.mark.asyncio
+    async def test_callback_error_does_not_kill_the_session(
+        self, engine, session, transport
+    ):
+        """A raising callback is logged; the session keeps running."""
+        # Arrange
+        calls: list[str] = []
+
+        async def boom(msg) -> None:
+            calls.append(msg.msg_type)
+            raise RuntimeError("app bug")
+
+        session.on_message(boom)
+        session.status = SessionStatus.LOGGED_ON
+        await engine.start()
+
+        # Act
+        transport.feed(
+            FIXMessageFactory.create_heartbeat(
+                "SERVER", "CLIENT", seq=1
+            ).serialize()
+        )
+
+        # Assert
+        await _wait_until(lambda: calls, timeout=2.0)
+        assert session.status == SessionStatus.LOGGED_ON
+        assert engine._reader_task is not None
+        assert not engine._reader_task.done()
+
+    @pytest.mark.asyncio
+    async def test_callbacks_preserve_message_order(
+        self, engine, session, transport
+    ):
+        """One callback task means messages arrive in the order received."""
+        # Arrange
+        seen: list[int] = []
+        session.on_message(lambda msg: seen.append(msg.sequence))
+        session.status = SessionStatus.LOGGED_ON
+        await engine.start()
+
+        # Act
+        for seq in (1, 2, 3):
+            transport.feed(
+                FIXMessageFactory.create_heartbeat(
+                    "SERVER", "CLIENT", seq=seq
+                ).serialize()
+            )
+
+        # Assert
+        await _wait_until(lambda: len(seen) == 3, timeout=2.0)
+        assert seen == [1, 2, 3]
+
+    @pytest.mark.asyncio
+    async def test_processed_messages_reach_callbacks_before_stop_returns(
+        self, engine, session, transport
+    ):
+        """Shutdown drains queued callbacks instead of dropping them."""
+        # Arrange
+        seen: list[int] = []
+        session.on_message(lambda msg: seen.append(msg.sequence))
+        session.status = SessionStatus.LOGGED_ON
+        await engine.start()
+
+        # Act: let the reader process it, then shut down
+        transport.feed(
+            FIXMessageFactory.create_heartbeat(
+                "SERVER", "CLIENT", seq=1
+            ).serialize()
+        )
+        await _wait_until(
+            lambda: session._state.incoming_seq_num == 1, timeout=2.0
+        )
+        await engine.stop()
+
+        # Assert
+        assert seen == [1]
+
+    @pytest.mark.asyncio
+    async def test_polling_task_does_not_swallow_cancellation(
+        self, engine, session, transport
+    ):
+        """Cancellation must not be mistaken for a poll timeout.
+
+        asyncio can surface a cancellation as TimeoutError when it races
+        with wait_for's timeout. Swallowing it leaves the task running
+        forever, which hangs event-loop teardown.
+        """
+        # Arrange: get the callback task polling with work just done
+        transport.feed(_peer_logon())
+        await engine.connect()
+        session._state.test_request_id = "POST-CONNECT"
+        transport.feed(
+            FIXMessageFactory.create_heartbeat(
+                "SERVER", "CLIENT", seq=2, test_req_id="POST-CONNECT"
+            ).serialize()
+        )
+        for _ in range(4):
+            await asyncio.sleep(0)
+        task = engine._callback_task
+        assert task is not None
+
+        # Act
+        task.cancel()
+
+        # Assert: it actually stops instead of resuming the poll loop
+        with pytest.raises(asyncio.CancelledError):
+            await asyncio.wait_for(task, timeout=1.0)
+
+    @pytest.mark.asyncio
+    async def test_callback_task_lifecycle(self, engine):
+        """The callback task is spawned on start and cleared on stop."""
+        # Arrange
+        await engine.start()
+        assert engine._callback_task is not None
+
+        # Act
+        await engine.stop()
+
+        # Assert
+        assert engine._callback_task is None
+
+
 def _peer_logon(seq: int = 1) -> bytes:
     """Serialized Logon from the server, for driving the handshake."""
     return FIXMessageFactory.create_logon(
