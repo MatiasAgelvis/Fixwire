@@ -978,3 +978,57 @@ class TestFIXSessionMessageHandling:
         assert len(messages) == 2
         assert messages[0][34] == "1"
         assert messages[1][34] == "2"
+
+
+class TestFIXSessionCallbackDispatch:
+    """Callbacks run inline by default; a dispatcher can take them over.
+
+    The runner installs a dispatcher so a slow application callback cannot
+    stall the receive path (and with it heartbeat and TestRequest handling).
+    """
+
+    @pytest.mark.asyncio
+    async def test_dispatcher_replaces_inline_notification(self, session):
+        """With a dispatcher, callbacks are not awaited on the receive path."""
+        # Arrange
+        inline: list[FIXMessage] = []
+        dispatched: list[FIXMessage] = []
+        session.on_message(inline.append)
+        session.set_callback_dispatcher(dispatched.append)
+        heartbeat = FIXMessageFactory.create_heartbeat("SERVER", "CLIENT", seq=1)
+
+        # Act
+        await session.receive(heartbeat.serialize())
+
+        # Assert: handed over exactly once, never invoked inline
+        assert inline == []
+        assert [msg.sequence for msg in dispatched] == [1]
+
+    @pytest.mark.asyncio
+    async def test_inline_callbacks_still_run_without_a_dispatcher(self, session):
+        """Standalone sessions keep the synchronous behaviour."""
+        # Arrange
+        received: list[FIXMessage] = []
+        session.on_message(received.append)
+        heartbeat = FIXMessageFactory.create_heartbeat("SERVER", "CLIENT", seq=1)
+
+        # Act
+        await session.receive(heartbeat.serialize())
+
+        # Assert
+        assert [msg.sequence for msg in received] == [1]
+
+    @pytest.mark.asyncio
+    async def test_dispatcher_is_not_called_for_dropped_messages(self, session):
+        """A gap message is never handed to the application."""
+        # Arrange
+        dispatched: list[FIXMessage] = []
+        session.set_callback_dispatcher(dispatched.append)
+        session.status = SessionStatus.LOGGED_ON
+        heartbeat = FIXMessageFactory.create_heartbeat("SERVER", "CLIENT", seq=5)
+
+        # Act: expecting 1, so this is a gap
+        await session.receive(heartbeat.serialize())
+
+        # Assert
+        assert dispatched == []
