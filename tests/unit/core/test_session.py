@@ -202,6 +202,63 @@ class TestFIXSessionHeartbeatDecision:
         assert session.status == SessionStatus.ERROR
 
 
+class TestFIXSessionPendingOutbound:
+    """Inspecting and discarding what is queued but not yet on the wire."""
+
+    @pytest.mark.asyncio
+    async def test_pending_send_count_tracks_the_queue(self, session):
+        """The count reflects messages queued for the writer."""
+        # Arrange
+        assert session.pending_send_count() == 0
+
+        # Act
+        await session.send(
+            FIXMessageFactory.create_heartbeat("CLIENT", "SERVER", 0)
+        )
+
+        # Assert
+        assert session.pending_send_count() == 1
+
+    @pytest.mark.asyncio
+    async def test_discard_pending_send_returns_messages_and_rewinds(
+        self, session
+    ):
+        """Discarded messages come back and their seq numbers are reusable.
+
+        They were never handed to the transport, so rewinding keeps the
+        peer from seeing a gap that would have to be gap-filled away.
+        """
+        # Arrange
+        await session.send(
+            FIXMessageFactory.create_heartbeat("CLIENT", "SERVER", 0)
+        )
+        await session.send(
+            FIXMessageFactory.create_heartbeat("CLIENT", "SERVER", 0)
+        )
+        assert session.get_next_send_seq_num() == 3
+
+        # Act
+        discarded = session.discard_pending_send()
+
+        # Assert
+        assert [m.msg_type for m in discarded] == [MsgType.HEARTBEAT] * 2
+        assert session.pending_send_count() == 0
+        assert session.get_next_send_seq_num() == 1
+
+    @pytest.mark.asyncio
+    async def test_discard_pending_send_on_empty_queue_is_a_noop(self, session):
+        """Nothing queued means nothing to rewind."""
+        # Arrange
+        seq_before = session.get_next_send_seq_num()
+
+        # Act
+        discarded = session.discard_pending_send()
+
+        # Assert
+        assert discarded == []
+        assert session.get_next_send_seq_num() == seq_before
+
+
 class TestFIXSessionHeartbeatSend:
     """Outbound heartbeats: send one when we have been quiet.
 
