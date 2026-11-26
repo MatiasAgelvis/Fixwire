@@ -179,3 +179,33 @@ class TestFileOutbox:
         # Assert
         assert await outbox.get_range(key, 1, 1) == [b"m1"]
         assert not (tmp_path / "etc").exists()
+
+    @pytest.mark.asyncio
+    async def test_truncate_drops_newer_records(self, tmp_path):
+        """Discarding unsent messages rewrites the journal without them."""
+        # Arrange
+        outbox = _store(tmp_path)
+        for seq in (1, 2, 3):
+            await outbox.append(KEY, seq, b"m" + str(seq).encode())
+
+        # Act
+        await outbox.truncate(KEY, 1)
+
+        # Assert
+        assert await outbox.get_range(KEY, 1, 10) == [b"m1"]
+        assert await _store(tmp_path).count(KEY) == 1
+
+    @pytest.mark.asyncio
+    async def test_truncate_then_reuse_keeps_a_single_record(self, tmp_path):
+        """Reusing a rewound seq must not leave two records for it."""
+        # Arrange
+        outbox = _store(tmp_path)
+        await outbox.append(KEY, 1, b"old")
+
+        # Act
+        await outbox.truncate(KEY, 0)
+        await outbox.append(KEY, 1, b"new")
+
+        # Assert
+        assert await outbox.get_range(KEY, 1, 1) == [b"new"]
+        assert await outbox.count(KEY) == 1
