@@ -17,6 +17,7 @@ import structlog
 from fixwire.core.factory import FIXMessageFactory
 from fixwire.core.message import FIXMessage
 from fixwire.core.parser import FIXParser, ParserConfig
+from fixwire.core.sequence import InMemorySequenceStore, SequenceState, SequenceStore
 from fixwire.core.tags import MsgType, Tags
 from fixwire.core.time import utc_now
 
@@ -84,6 +85,11 @@ class SessionConfig:
     # Bounds the outbound queue. Overflow raises SessionQueueFullError rather
     # than blocking. None means unbounded; 0 and negative are rejected.
     send_queue_size: int | None = 10_000
+    # Where sequence numbers live between runs. The default keeps them in
+    # memory, so a fresh process legitimately starts at zero.
+    sequence_store: SequenceStore = field(
+        default_factory=InMemorySequenceStore
+    )
 
     def __post_init__(self) -> None:
         """Reject queue bounds that would silently mean unbounded.
@@ -131,6 +137,7 @@ class FIXSession:
         self.config = config
         self.parser = FIXParser(config.parser)
         self.factory = FIXMessageFactory()
+        self._store = config.sequence_store
         self._state = _SessionState()
         self._send_queue: asyncio.Queue[FIXMessage] = asyncio.Queue(
             maxsize=config.send_queue_size or 0
@@ -213,6 +220,35 @@ class FIXSession:
         self._state.outgoing_seq_num += 1
         return self._state.outgoing_seq_num
 
+    @property
+    def _session_key(self) -> tuple[str, str]:
+        """Store key: our SenderCompID and the peer we are talking to."""
+        return (self.config.sender_comp_id, self.config.target_comp_id)
+
+    async def _restore_sequence(self) -> None:
+        """Adopt persisted numbers, if this session has any."""
+        state = await self._store.load(self._session_key)
+        if state is None:
+            return
+        self._state.outgoing_seq_num = state.outgoing
+        self._state.incoming_seq_num = state.incoming
+        logger.info("session.sequence_restored",
+                    outgoing=state.outgoing,
+                    incoming=state.incoming,
+                    sender=self.config.sender_comp_id,
+                    target=self.config.target_comp_id)
+
+    async def _persist_sequence(self) -> None:
+        """Write the current numbers through to the store."""
+        await self._store.save(
+            SequenceState(
+                sender_comp_id=self.config.sender_comp_id,
+                target_comp_id=self.config.target_comp_id,
+                outgoing=self._state.outgoing_seq_num,
+                incoming=self._state.incoming_seq_num,
+            )
+        )
+
     async def send(self, msg: FIXMessage) -> None:
         """Send a FIX message.
 
@@ -250,6 +286,10 @@ class FIXSession:
 
         # Serialize and queue for sending. Safe without awaiting: nothing
         # can interleave between the capacity check and this call.
+        #
+        # Write-ahead: the number must be durable before the message can
+        # leave. If persisting fails, the message is not queued.
+        await self._persist_sequence()
         self._send_queue.put_nowait(msg)
 
         self._state.last_sent_time = utc_now()
@@ -270,12 +310,14 @@ class FIXSession:
         """
         return list(getattr(self._send_queue, "_queue"))  # noqa: B009
 
-    def discard_pending_send(self) -> list[FIXMessage]:
+    async def discard_pending_send(self) -> list[FIXMessage]:
         """Drop queued outbound messages and rewind the sequence baseline.
 
         The messages were never handed to the transport, so their sequence
         numbers are free to reuse: rewinding stops the peer from seeing a
-        gap that would otherwise have to be gap-filled away.
+        gap that would otherwise have to be gap-filled away. The rewound
+        value is persisted, otherwise a restart would hand those numbers
+        out again.
 
         Returns:
             The discarded messages, so the caller can report or resubmit
@@ -291,6 +333,7 @@ class FIXSession:
             self._state.outgoing_seq_num = min(
                 msg.sequence for msg in discarded
             ) - 1
+            await self._persist_sequence()
         return discarded
 
     async def receive(self, data: bytes) -> list[FIXMessage]:
@@ -371,6 +414,7 @@ class FIXSession:
 
         if received == expected:
             self._state.incoming_seq_num = received
+            await self._persist_sequence()
             return True
 
         if received > expected:
@@ -450,6 +494,7 @@ class FIXSession:
             self._state.incoming_seq_num = msg.sequence
             self.status = SessionStatus.LOGGED_ON
             self._state.logon_time = utc_now()
+            await self._persist_sequence()
             logger.info("session.logon_success",
                        sender=self.config.sender_comp_id,
                        target=self.config.target_comp_id)
@@ -462,6 +507,9 @@ class FIXSession:
             if not await self._admit_logon(msg):
                 return
             self.status = SessionStatus.WAITING_LOGON
+            # The peer identity is known now, so persisted numbers can be
+            # adopted before the Logon response consumes an outgoing one.
+            await self._restore_sequence()
             self._state.incoming_seq_num = msg.sequence
 
             # Send logon response using factory
@@ -575,11 +623,13 @@ class FIXSession:
                                new_seq_no=new_seq)
                 return
             self._state.incoming_seq_num = new_seq - 1
+            await self._persist_sequence()
             logger.info("session.gap_fill",
                        new_seq=new_seq)
             return
 
         self._state.incoming_seq_num = new_seq - 1
+        await self._persist_sequence()
         logger.info("session.sequence_reset",
                    new_seq=new_seq)
 
@@ -593,8 +643,13 @@ class FIXSession:
         self.status = SessionStatus.CONNECTING
 
         if self.config.reset_seq_num:
+            # Starting a new sequence overwrites the stored one as soon as
+            # the Logon is queued, so the persisted numbers are ignored
+            # rather than explicitly cleared.
             self._state.outgoing_seq_num = 0
             self._state.incoming_seq_num = 0
+        else:
+            await self._restore_sequence()
 
         # Send logon using factory
         logon = FIXMessageFactory.create_logon(

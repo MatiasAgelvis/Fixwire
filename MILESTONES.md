@@ -145,7 +145,7 @@ Every milestone declares which level it aims at. Level must be **proven via the 
 **Goal:** Survive process restart and transient network loss without operator intervention.
 
 **Scope:**
-- **`SequenceStore` protocol.** Pluggable; default implementation = file-backed JSON per session (atomic write on each seq change).
+- **`SequenceStore` protocol.** Pluggable; default implementation = file-backed JSON per session (atomic write on each seq change). *(Shipped: protocol plus in-memory and file-backed implementations. The in-memory store is the `SessionConfig` default, so a fresh process legitimately starts at zero unless the application opts into file storage. Saves are write-ahead with atomic replace; `fsync` is opt-in.)*
 - **Reconnection with exponential backoff.** `FIXSessionRunner.reconnect(Strategy)` with `max_retries` and base `retry_delay`; honors `config.max_retries` and `config.retry_delay` from `SessionConfig`.
 - **Crash-safe outbox** (foundation for M5). Outbound messages persisted before they hit the wire; restored on reconnect.
 - **Audit logging.** Every state transition, every msg in/out, every error — structured via `structlog`, levels correct (DEBUG for message traces, INFO for lifecycle, WARNING for recoverable, ERROR for sessions-ending, no CRITICAL).

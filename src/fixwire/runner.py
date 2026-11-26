@@ -546,7 +546,7 @@ class FIXSessionRunner:
                 len(pending), [m.msg_type for m in pending]
             )
         if pending:
-            discarded = self._session.discard_pending_send()
+            discarded = await self._session.discard_pending_send()
             logger.warning(
                 "runner.discarded_on_reconnect",
                 count=len(discarded),
