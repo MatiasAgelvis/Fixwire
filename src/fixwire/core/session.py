@@ -16,6 +16,7 @@ import structlog
 
 from fixwire.core.factory import FIXMessageFactory
 from fixwire.core.message import FIXMessage
+from fixwire.core.outbox import InMemoryOutbox, Outbox
 from fixwire.core.parser import FIXParser, ParserConfig
 from fixwire.core.sequence import InMemorySequenceStore, SequenceState, SequenceStore
 from fixwire.core.tags import MsgType, Tags
@@ -90,6 +91,9 @@ class SessionConfig:
     sequence_store: SequenceStore = field(
         default_factory=InMemorySequenceStore
     )
+    # Where sent messages are kept so a ResendRequest can be answered with
+    # real replays. The default keeps them in memory for the session's life.
+    outbox: Outbox = field(default_factory=InMemoryOutbox)
 
     def __post_init__(self) -> None:
         """Reject queue bounds that would silently mean unbounded.
@@ -138,6 +142,7 @@ class FIXSession:
         self.parser = FIXParser(config.parser)
         self.factory = FIXMessageFactory()
         self._store = config.sequence_store
+        self._outbox = config.outbox
         self._state = _SessionState()
         self._send_queue: asyncio.Queue[FIXMessage] = asyncio.Queue(
             maxsize=config.send_queue_size or 0
@@ -288,8 +293,12 @@ class FIXSession:
         # can interleave between the capacity check and this call.
         #
         # Write-ahead: the number must be durable before the message can
-        # leave. If persisting fails, the message is not queued.
+        # leave, and so must a copy of the message itself — otherwise a drop
+        # leaves the peer asking for something we cannot replay. If either
+        # write fails, the message is not queued.
+        payload = msg.serialize()
         await self._persist_sequence()
+        await self._outbox.append(self._session_key, msg.sequence, payload)
         self._send_queue.put_nowait(msg)
 
         self._state.last_sent_time = utc_now()
@@ -330,9 +339,11 @@ class FIXSession:
             except asyncio.QueueEmpty:
                 break
         if discarded:
-            self._state.outgoing_seq_num = min(
-                msg.sequence for msg in discarded
-            ) - 1
+            rewind_to = min(msg.sequence for msg in discarded) - 1
+            self._state.outgoing_seq_num = rewind_to
+            # Drop the stored copies first: their numbers are about to be
+            # reused, and two records for one number would replay twice.
+            await self._outbox.truncate(self._session_key, rewind_to)
             await self._persist_sequence()
         return discarded
 
