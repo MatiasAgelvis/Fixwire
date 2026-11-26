@@ -253,7 +253,7 @@ class TestFIXSessionPendingOutbound:
         assert session.get_next_send_seq_num() == 3
 
         # Act
-        discarded = session.discard_pending_send()
+        discarded = await session.discard_pending_send()
 
         # Assert
         assert [m.msg_type for m in discarded] == [MsgType.HEARTBEAT] * 2
@@ -267,7 +267,7 @@ class TestFIXSessionPendingOutbound:
         seq_before = session.get_next_send_seq_num()
 
         # Act
-        discarded = session.discard_pending_send()
+        discarded = await session.discard_pending_send()
 
         # Assert
         assert discarded == []
