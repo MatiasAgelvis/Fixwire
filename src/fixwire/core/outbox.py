@@ -49,6 +49,15 @@ class Outbox(Protocol):
         """Drop messages up to and including ``through``."""
         ...
 
+    async def truncate(self, key: SessionKey, after: int) -> None:
+        """Drop messages with MsgSeqNum greater than ``after``.
+
+        Used when queued messages are discarded on reconnect: their numbers
+        are rewound and reused, so their stored copies must go too, or a
+        resend would emit two messages for one sequence number.
+        """
+        ...
+
     async def clear(self, key: SessionKey) -> None:
         """Forget every message for this session."""
         ...
@@ -96,6 +105,13 @@ class InMemoryOutbox:
         if not records:
             return
         for seq in [seq for seq in records if seq <= through]:
+            del records[seq]
+
+    async def truncate(self, key: SessionKey, after: int) -> None:
+        records = self._messages.get(key)
+        if not records:
+            return
+        for seq in [seq for seq in records if seq > after]:
             del records[seq]
 
     async def clear(self, key: SessionKey) -> None:
