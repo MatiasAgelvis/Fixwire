@@ -14,6 +14,7 @@ from dataclasses import asdict
 from pathlib import Path
 
 from fixwire.core.sequence import SequenceState, SequenceStoreError, SessionKey
+from fixwire.persistence._paths import session_filename
 
 
 class FileSequenceStore:
@@ -100,7 +101,7 @@ class FileSequenceStore:
             raise SequenceStoreError(f"Cannot remove {path}: {exc}") from exc
 
     def _path(self, key: SessionKey) -> Path:
-        return self._directory / f"{_filename(key)}.json"
+        return self._directory / session_filename(key, ".json")
 
     def _sync_directory(self) -> None:
         """Flush the rename itself, which file fsync does not cover."""
@@ -114,17 +115,3 @@ class FileSequenceStore:
             pass
         finally:
             os.close(descriptor)
-
-
-def _filename(key: SessionKey) -> str:
-    """Turn a session identity into a safe filename component.
-
-    Only alphanumerics survive; everything else becomes ``_``. That is
-    lossy on purpose — collisions are caught on load by comparing the
-    identity stored inside the file.
-    """
-    raw = f"{key[0]}--{key[1]}"
-    return "".join(
-        character if character.isalnum() or character in "-_." else "_"
-        for character in raw
-    )
