@@ -103,6 +103,17 @@ class FileOutbox:
             raise OutboxError(f"Cannot remove {path}: {exc}") from exc
         self._counts.pop(key, None)
 
+    async def truncate(self, key: SessionKey, after: int) -> None:
+        path = self._path(key)
+        if not path.exists():
+            return
+        records = self._records(path, key)
+        kept = [(seq, data) for seq, data in records if seq <= after]
+        if len(kept) == len(records):
+            return
+        self._write(path, key, kept)
+        self._counts[key] = len(kept)
+
     async def count(self, key: SessionKey) -> int:
         path = self._path(key)
         if not path.exists():

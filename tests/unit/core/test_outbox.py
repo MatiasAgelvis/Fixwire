@@ -139,3 +139,18 @@ class TestInMemoryOutbox:
         assert b"m6" in stored
         assert b"m1" not in stored
         assert await outbox.count(KEY) <= 4
+
+    @pytest.mark.asyncio
+    async def test_truncate_drops_newer_records(self):
+        """Discarding unsent messages removes them from the outbox."""
+        # Arrange
+        outbox = InMemoryOutbox()
+        for seq in (1, 2, 3, 4):
+            await outbox.append(KEY, seq, b"m" + str(seq).encode())
+
+        # Act
+        await outbox.truncate(KEY, 2)
+
+        # Assert
+        assert await outbox.get_range(KEY, 1, 10) == [b"m1", b"m2"]
+        assert await outbox.count(KEY) == 2
