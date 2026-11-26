@@ -17,6 +17,7 @@ import structlog
 from fixwire.core.factory import FIXMessageFactory
 from fixwire.core.message import FIXMessage
 from fixwire.core.parser import FIXParser, ParserConfig
+from fixwire.core.sequence import InMemorySequenceStore, SequenceState, SequenceStore
 from fixwire.core.tags import MsgType, Tags
 from fixwire.core.time import utc_now
 
@@ -84,6 +85,11 @@ class SessionConfig:
     # Bounds the outbound queue. Overflow raises SessionQueueFullError rather
     # than blocking. None means unbounded; 0 and negative are rejected.
     send_queue_size: int | None = 10_000
+    # Where sequence numbers live between runs. The default keeps them in
+    # memory, so a fresh process legitimately starts at zero.
+    sequence_store: SequenceStore = field(
+        default_factory=InMemorySequenceStore
+    )
 
     def __post_init__(self) -> None:
         """Reject queue bounds that would silently mean unbounded.
@@ -131,6 +137,7 @@ class FIXSession:
         self.config = config
         self.parser = FIXParser(config.parser)
         self.factory = FIXMessageFactory()
+        self._store = config.sequence_store
         self._state = _SessionState()
         self._send_queue: asyncio.Queue[FIXMessage] = asyncio.Queue(
             maxsize=config.send_queue_size or 0
@@ -212,6 +219,35 @@ class FIXSession:
         """Get next outgoing sequence number."""
         self._state.outgoing_seq_num += 1
         return self._state.outgoing_seq_num
+
+    @property
+    def _session_key(self) -> tuple[str, str]:
+        """Store key: our SenderCompID and the peer we are talking to."""
+        return (self.config.sender_comp_id, self.config.target_comp_id)
+
+    async def _restore_sequence(self) -> None:
+        """Adopt persisted numbers, if this session has any."""
+        state = await self._store.load(self._session_key)
+        if state is None:
+            return
+        self._state.outgoing_seq_num = state.outgoing
+        self._state.incoming_seq_num = state.incoming
+        logger.info("session.sequence_restored",
+                    outgoing=state.outgoing,
+                    incoming=state.incoming,
+                    sender=self.config.sender_comp_id,
+                    target=self.config.target_comp_id)
+
+    async def _persist_sequence(self) -> None:
+        """Write the current numbers through to the store."""
+        await self._store.save(
+            SequenceState(
+                sender_comp_id=self.config.sender_comp_id,
+                target_comp_id=self.config.target_comp_id,
+                outgoing=self._state.outgoing_seq_num,
+                incoming=self._state.incoming_seq_num,
+            )
+        )
 
     async def send(self, msg: FIXMessage) -> None:
         """Send a FIX message.
