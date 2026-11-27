@@ -54,8 +54,8 @@ Every milestone declares which level it aims at. Level must be **proven via the 
 |---|---|---|---|---|
 | M0 | Foundations (core protocol + transport) | A | ✅ Done | message, parser, factory, session — protocol logic |
 | M1 | Engine architecture (extract `FIXSessionRunner`, wire transport) | A | ✅ Done | `FIXSessionRunner` + reader/writer tasks + lifecycle; design doc in `docs/design/session-transport.md` |
-| M2 | Protocol hardening (seq verify, heartbeat, reject, gap-fill) | B | [ ] Todo | Incoming seq verify is the critical missing piece |
-| M3 | Resilience (reconnect, persistence, audit logging) | B | [ ] Todo | Pluggable `SequenceStore` interface; file-backed default |
+| M2 | Protocol hardening (seq verify, heartbeat, reject, gap-fill) | B | ✅ Done | Sequence integrity and incoming verification, heartbeat/TestRequest timing, teardown drain, strict parser default. Tagged `M2`. |
+| M3 | Resilience (reconnect, persistence, audit logging) | B | ✅ Done | Reconnect with jittered backoff, pluggable `SequenceStore`, write-ahead outbox, callback isolation, bounded queues, audit-log spec with enforcement, graceful shutdown. Bar B covered by `tests/unit/test_chaos.py`. Inbound queue deferred (`TODO.md`). |
 | M4 | Security (WSS, TLS, no-secret-in-logs) | B | [ ] Todo | `wss://` first-class; cert validation configurable |
 | M5 | Full resend (real replay, not just GapFill) | B | [ ] Todo | Persistent outbox; resend semantics per spec |
 | M6 | FIX 4.4 conformance & roles (accept + initiate) | **C** | [ ] Todo | Spec cross-check matrix; raises V1.0 to Level C |
@@ -145,12 +145,12 @@ Every milestone declares which level it aims at. Level must be **proven via the 
 **Goal:** Survive process restart and transient network loss without operator intervention.
 
 **Scope:**
-- **`SequenceStore` protocol.** Pluggable; default implementation = file-backed JSON per session (atomic write on each seq change). *(Shipped: protocol plus in-memory and file-backed implementations. The in-memory store is the `SessionConfig` default, so a fresh process legitimately starts at zero unless the application opts into file storage. Saves are write-ahead with atomic replace; `fsync` is opt-in.)*
+- **`SequenceStore` protocol.** Pluggable, with in-memory and file-backed implementations. The in-memory store is the `SessionConfig` default, so a fresh process starts at zero unless the application opts into file storage. Saves are write-ahead with atomic replace; `fsync` is opt-in.
 - **Reconnection with exponential backoff.** `FIXSessionRunner.reconnect(Strategy)` with `max_retries` and base `retry_delay`; honors `config.max_retries` and `config.retry_delay` from `SessionConfig`.
 - **Crash-safe outbox** (foundation for M5). Outbound messages persisted before they hit the wire; restored on reconnect. *(Shipped: pluggable `Outbox` with in-memory and append-only journal implementations; `send()` persists before queueing, sequence first so a crash leaves a gap rather than a reused number. Replay on `ResendRequest` lands with M5.)*
-- **Audit logging.** Every state transition, every msg in/out, every error — structured via `structlog`, levels correct (DEBUG for message traces, INFO for lifecycle, WARNING for recoverable, ERROR for sessions-ending, no CRITICAL).
+- **Audit logging.** Every state transition, every msg in/out, every error — structured via `structlog`, levels correct (DEBUG for message traces, INFO for lifecycle, WARNING for recoverable, ERROR for sessions-ending, no CRITICAL). *(Shipped: `docs/AUDIT_LOGGING.md` defines the taxonomy and level meanings; `tests/unit/test_logging_taxonomy.py` enforces it and cross-checks the catalogue both ways.)*
 - **Bounded inbound queue** (the M1 deferral lands here). Depth-bounded queue between transport and session, with queue-full policy: block with timeout → `ERROR` — **never drop**; sequence integrity is inviolable. Exposes queue depth for observability. *(Deferred — see `TODO.md` under Backpressure: nothing slow sits between transport and session now that app callbacks run off the receive path.)*
-- **App callback isolation.** `on_message` callbacks must never block protocol handling (heartbeat/TestRequest responses). Hand off to their own task so a slow app degrades itself, not the session.
+- **App callback isolation.** `on_message` callbacks must never block protocol handling (heartbeat/TestRequest responses). Hand off to their own task so a slow app degrades itself, not the session. *(Shipped: the runner owns an ordered callback task fed by a sync dispatcher; the queue is bounded and overflow fails the session rather than dropping events.)*
 - **Time shutdown.** Clean shutdown on SIGTERM — graceful logout first, then transport close. *(Shipped: `fixwire.shutdown.GracefulShutdown` handles SIGTERM/SIGINT and runs stop callbacks in order with a per-step bound; `FIXServer.stop(timeout=...)` tears sessions down concurrently, so shutdown costs one `logout_timeout` rather than one per session.)*
 
 **Deliverables:**
@@ -209,7 +209,7 @@ Every milestone declares which level it aims at. Level must be **proven via the 
 **Goal:** Conform to the FIX 4.4 specification. Add the missing session role(s) and prove conformance against the spec document.
 
 **Scope:**
-- **Accept-session role (server-side).** Today the session is initiator-only. Add a `role: SessionRole` field in `SessionConfig`. Server accepts incoming Logons, validates credentials, responds.
+- **Accept-session role (server-side).** The accept path exists (`FIXSessionRunner.accept()` plus `FIXServer.serve_connection()`), but the role is still implicit. Add a `role: SessionRole` field in `SessionConfig` and make behaviour conditional on it. Server accepts incoming Logons, validates credentials, responds.
 - **Initiate-session role (client-side).** Already supported but formalized as `SessionRole.INITIATOR`.
 - **Spec cross-check matrix.** A doc (`docs/FIX44_CONFORMANCE.md`) listing every FIX 4.4 requirement with a test name that proves it. No requirement without a named test.
 - **Full conformance test suite.** Each requirement → a passing test. The suite is the artifact a bank runs in CI before installing.
