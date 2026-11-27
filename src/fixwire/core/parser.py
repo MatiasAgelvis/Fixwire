@@ -11,6 +11,7 @@ import structlog
 
 from fixwire.core.constants import SOH
 from fixwire.core.message import FIXMessage
+from fixwire.core.redaction import redact
 
 logger = structlog.get_logger()
 
@@ -113,7 +114,8 @@ class FIXParser:
                     raw=bytes(self._buffer),
                     tag=8
                 )
-            logger.warning("parser.invalid_begin_string", raw=bytes(self._buffer[:50]))
+            logger.warning("parser.invalid_begin_string",
+                           raw=redact(bytes(self._buffer[:50])))
             # Skip to next SOH and continue
             next_soh = self._buffer.find(SOH.encode())
             if next_soh != -1:
@@ -167,7 +169,7 @@ class FIXParser:
         except FIXParseError as e:
             if self.config.strict:
                 raise
-            logger.warning("parser.error", error=str(e), raw=raw_msg[:100])
+            logger.warning("parser.error", error=str(e), raw=redact(raw_msg[:100]))
             return None
 
     def _reject_oversized(self) -> None:
@@ -402,7 +404,7 @@ class FIXParser:
         if idx == -1:
             if self.config.strict:
                 raise FIXParseError("No checksum tag found", raw=raw)
-            logger.warning("parser.no_checksum", raw=raw[:50])
+            logger.warning("parser.no_checksum", raw=redact(raw[:50]))
             return False
 
         # Calculate checksum of all bytes before tag 10
@@ -414,7 +416,7 @@ class FIXParser:
         except (ValueError, IndexError):
             if self.config.strict:
                 raise FIXParseError("Invalid checksum format", raw=raw, tag=10) from None
-            logger.warning("parser.invalid_checksum_format", raw=raw[:50])
+            logger.warning("parser.invalid_checksum_format", raw=redact(raw[:50]))
             return False
 
         if calculated != extracted:
