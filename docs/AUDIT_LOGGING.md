@@ -76,11 +76,18 @@ Field names are the FIX concepts, not internal ones: `sender`, `target`,
   it is attacker-controlled and may contain anything.
 - Anything that would not be safe in a screenshot on a support ticket.
 
-## Payloads are truncated
+## Payloads are truncated and redacted
 
 Parser diagnostics log at most the first 100 bytes of a message, and the
 checksum diagnostics 50. Keep it that way: a malformed-message flood must
 not become a log flood of full payloads.
+
+Those prefixes are also **redacted** (`fixwire.core.redaction`): the values
+of `Username` (553), `Password` (554), `NewPassword` (925) and `RawData`
+(96) are replaced with `***` before logging. A malformed Logon is the exact
+message most likely to carry a password, and it is also the one most likely
+to be logged for diagnosis. Redaction is tag-based, so it works on
+truncated or unparseable bytes.
 
 ## Retention and shipping
 
@@ -157,6 +164,7 @@ editing this document and `ALLOWED_ROOTS` in that test.
 |---|---|---|
 | `server.session_failed` | warning | One session raised out of its handler |
 | `server.duplicate_logon` | warning | Live identity claimed again |
+| `server.plaintext_rejected` | warning | Connection refused: TLS required, transport not encrypted |
 | `server.max_sessions_reached` | warning | Connection refused by the cap |
 | `server.stop_timeout` | warning | Teardown exceeded the shutdown deadline |
 
