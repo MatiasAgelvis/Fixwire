@@ -5,6 +5,8 @@ message can be diagnosed. A malformed *Logon* can carry a password, so the
 prefix is redacted before it reaches a logger.
 """
 
+import pytest
+
 from fixwire.core.redaction import redact
 
 SOH = b"\x01"
@@ -91,3 +93,59 @@ class TestParserDiagnosticsAreRedacted:
         assert any(e["event"] == "parser.invalid_begin_string" for e in logs)
         assert "supersecret" not in str(logs)
         assert "***" in str(logs)
+
+
+class TestRedactUrl:
+    """Connection URLs can carry credentials, and URLs get logged."""
+
+    def test_userinfo_is_stripped(self):
+        """A password in the URL must never reach a log line."""
+        from fixwire.core.redaction import redact_url
+
+        assert (
+            redact_url("wss://user:secret@example.com:443/fix")
+            == "wss://example.com:443/fix"
+        )
+
+    def test_username_only_is_stripped(self):
+        """A bare username is still identity data."""
+        from fixwire.core.redaction import redact_url
+
+        assert redact_url("wss://trader@example.com") == "wss://example.com"
+
+    def test_a_plain_url_is_unchanged(self):
+        """Nothing to redact, nothing changed."""
+        from fixwire.core.redaction import redact_url
+
+        assert redact_url("ws://localhost:8001") == "ws://localhost:8001"
+
+
+class TestRejectTextIsNotLogged:
+    """Tag 58 is counterparty-supplied: it may say anything."""
+
+    @pytest.mark.asyncio
+    async def test_reject_text_is_omitted(self):
+        """The event reports the rejection, not the peer's prose."""
+        from structlog.testing import capture_logs
+
+        from fixwire.core.factory import FIXMessageFactory
+        from fixwire.core.session import (
+            FIXSession,
+            SessionConfig,
+            SessionStatus,
+        )
+
+        session = FIXSession(
+            SessionConfig(sender_comp_id="CLIENT", target_comp_id="SERVER")
+        )
+        session.status = SessionStatus.LOGGED_ON
+        reject = FIXMessageFactory.create_reject(
+            "SERVER", "CLIENT", seq=1, ref_seq_num=1,
+            session_reject_reason=5, text="attacker controlled prose",
+        )
+
+        with capture_logs() as logs:
+            await session.receive(reject.serialize())
+
+        assert any(e["event"] == "session.rejected" for e in logs)
+        assert "attacker controlled prose" not in str(logs)

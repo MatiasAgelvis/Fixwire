@@ -56,7 +56,7 @@ Every milestone declares which level it aims at. Level must be **proven via the 
 | M1 | Engine architecture (extract `FIXSessionRunner`, wire transport) | A | ✅ Done | `FIXSessionRunner` + reader/writer tasks + lifecycle; design doc in `docs/design/session-transport.md` |
 | M2 | Protocol hardening (seq verify, heartbeat, reject, gap-fill) | B | ✅ Done | Sequence integrity and incoming verification, heartbeat/TestRequest timing, teardown drain, strict parser default. Tagged `M2`. |
 | M3 | Resilience (reconnect, persistence, audit logging) | B | ✅ Done | Reconnect with jittered backoff, pluggable `SequenceStore`, write-ahead outbox, callback isolation, bounded queues, audit-log spec with enforcement, graceful shutdown. Bar B covered by `tests/unit/test_chaos.py`. Inbound queue deferred (`TODO.md`). |
-| M4 | Security (WSS, TLS, no-secret-in-logs) | B | [ ] Todo | `wss://` first-class; cert validation configurable |
+| M4 | Security (WSS, TLS, no-secret-in-logs) | B | 🚧 In progress | `TLSConfig` with verification on by default, mTLS both directions, `require_tls` admission, transports report security posture, credential redaction, review checklists in `docs/M4_REVIEW_CHECKLISTS.md`. WSS and mTLS round-trips pass in `tests/integration/test_tls.py`; pending merge. |
 | M5 | Full resend (real replay, not just GapFill) | B | [ ] Todo | Persistent outbox; resend semantics per spec |
 | M6 | FIX 4.4 conformance & roles (accept + initiate) | **C** | [ ] Todo | Spec cross-check matrix; raises V1.0 to Level C |
 | M7 | V1.0 release (packaging, docs, CI, signing) | C | [ ] Todo | Banking-installable wheel + Docker + signed releases |

@@ -11,6 +11,8 @@ on the message parsing successfully.
 
 from __future__ import annotations
 
+from urllib.parse import urlsplit, urlunsplit
+
 from fixwire.core.constants import SOH
 from fixwire.core.tags import Tags
 
@@ -44,3 +46,17 @@ def redact(data: bytes) -> bytes:
         else:
             redacted.append(field)
     return SOH.encode().join(redacted)
+
+
+def redact_url(url: str) -> str:
+    """Strip credentials embedded in a URL.
+
+    Connection URLs are logged so operators can see where a session went. A
+    URL of the form ``wss://user:password@host`` would otherwise put the
+    password in the log.
+    """
+    parts = urlsplit(url)
+    if "@" not in parts.netloc:
+        return url
+    host = parts.netloc.rsplit("@", 1)[1]
+    return urlunsplit(parts._replace(netloc=host))
