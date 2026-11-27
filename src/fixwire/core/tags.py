@@ -84,6 +84,9 @@ class Tags(IntEnum):
     GAP_FILL_FLAG = 123
     RESET_SEQ_NUM_FLAG = 141
     REF_TAG_ID = 371
+    USERNAME = 553
+    PASSWORD = 554
+    NEW_PASSWORD = 925
     REF_MSG_TYPE = 372
     SESSION_REJECT_REASON = 373
 
@@ -104,6 +107,7 @@ class Tags(IntEnum):
     SIDE = 54
     SYMBOL = 55
     TEXT = 58
+    RAW_DATA = 96
     TIME_IN_FORCE = 59
     EXEC_TYPE = 150
     LEAVES_QTY = 151
@@ -249,7 +253,11 @@ TAG_NAMES: dict[int, str] = {
     80: "AllocAccount",
     98: "EncryptMethod",
     108: "HeartBtInt",
+    96: "RawData",
     112: "TestReqID",
+    553: "Username",
+    554: "Password",
+    925: "NewPassword",
     123: "GapFillFlag",
     140: "RawDataLength",
     141: "ResetSeqNumFlag",
