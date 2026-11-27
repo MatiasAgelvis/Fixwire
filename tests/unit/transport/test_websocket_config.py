@@ -4,10 +4,13 @@ These tests never bind a socket: they assert the adapter forwards its
 settings to ``websockets``, which is where the behaviour actually lives.
 """
 
+import ssl
+
 import pytest
 
 from fixwire.core.parser import ParserConfig
 from fixwire.transport import websocket as ws_module
+from fixwire.transport.tls import TLSConfig, TLSError
 from fixwire.transport.websocket import WebSocketServer, WebSocketTransport
 
 
@@ -100,3 +103,94 @@ class TestWebSocketServerSettings:
             "ping_interval": 10.0,
             "ping_timeout": None,
         }
+
+
+class TestWebSocketTLSWiring:
+    """TLS is optional, explicit, and fails early when misconfigured."""
+
+    @pytest.mark.asyncio
+    async def test_connect_passes_the_tls_context(self, monkeypatch):
+        """A configured context reaches websockets.connect as ``ssl``."""
+        # Arrange
+        captured: dict[str, object] = {}
+
+        async def fake_connect(url: str, **kwargs: object) -> object:
+            captured.update(kwargs)
+            return object()
+
+        monkeypatch.setattr(ws_module, "connect", fake_connect)
+        transport = WebSocketTransport(
+            "wss://localhost:1", tls=TLSConfig(verify=False)
+        )
+
+        # Act
+        await transport.connect()
+
+        # Assert
+        assert isinstance(captured["ssl"], ssl.SSLContext)
+        assert captured["ssl"].verify_mode == ssl.CERT_NONE
+
+    def test_a_bad_tls_config_fails_at_construction(self, tmp_path):
+        """Misconfiguration must not wait for the first handshake."""
+        # Act & Assert
+        with pytest.raises(TLSError, match="ca_file"):
+            WebSocketTransport(
+                "wss://localhost:1", tls=TLSConfig(ca_file=tmp_path / "no.pem")
+            )
+
+    def test_no_tls_config_leaves_websockets_defaults(self):
+        """Without TLS settings the transport must not override verification."""
+        # Act
+        transport = WebSocketTransport("wss://localhost:1")
+
+        # Assert
+        assert transport.tls is None
+
+
+class TestTransportSecurityReporting:
+    """Transports report their security posture; they are never asked."""
+
+    def test_plain_websocket_is_plaintext(self):
+        """No TLS config means no claim of encryption."""
+        from fixwire.transport import TransportSecurity
+
+        assert (
+            WebSocketTransport("ws://localhost:1").security
+            == TransportSecurity.PLAINTEXT
+        )
+
+    def test_configured_websocket_is_tls(self):
+        """A built context means the connection will be encrypted."""
+        from fixwire.transport import TransportSecurity
+
+        transport = WebSocketTransport(
+            "wss://localhost:1", tls=TLSConfig(verify=False)
+        )
+        assert transport.security == TransportSecurity.TLS
+
+    def test_adapter_reports_what_actually_happened(self):
+        """The server adapter derives posture from the live connection."""
+        from fixwire.transport import TransportSecurity
+        from fixwire.transport.websocket import WebSocketTransportAdapter
+
+        class _Underlying:
+            def __init__(self, ssl_object) -> None:
+                self._ssl_object = ssl_object
+
+            def get_extra_info(self, name: str):
+                return self._ssl_object if name == "ssl_object" else None
+
+        class _Connection:
+            def __init__(self, ssl_object) -> None:
+                self.transport = _Underlying(ssl_object)
+
+        encrypted = WebSocketTransportAdapter(_Connection(object()))
+        plain = WebSocketTransportAdapter(_Connection(None))
+
+        assert encrypted.security == TransportSecurity.TLS
+        assert plain.security == TransportSecurity.PLAINTEXT
+
+    def test_tls_with_a_plain_url_is_rejected(self):
+        """TLS settings on a ws:// URL are a configuration error."""
+        with pytest.raises(TLSError, match="wss"):
+            WebSocketTransport("ws://localhost:1", tls=TLSConfig(verify=False))
