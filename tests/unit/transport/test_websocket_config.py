@@ -194,3 +194,28 @@ class TestTransportSecurityReporting:
         """TLS settings on a ws:// URL are a configuration error."""
         with pytest.raises(TLSError, match="wss"):
             WebSocketTransport("ws://localhost:1", tls=TLSConfig(verify=False))
+
+
+class TestUrlRedactionInLogs:
+    """Connection URLs are logged, so credentials in them are not."""
+
+    @pytest.mark.asyncio
+    async def test_connected_log_hides_credentials(self, monkeypatch):
+        """A password in the URL must not appear in the log event."""
+        # Arrange
+        from structlog.testing import capture_logs
+
+        async def fake_connect(url: str, **kwargs: object) -> object:
+            return object()
+
+        monkeypatch.setattr(ws_module, "connect", fake_connect)
+        transport = WebSocketTransport("ws://user:secret@localhost:1")
+
+        # Act
+        with capture_logs() as logs:
+            await transport.connect()
+
+        # Assert: the log is still useful, but not the credential
+        assert any(e["event"] == "transport.ws.connected" for e in logs)
+        assert "secret" not in str(logs)
+        assert "localhost" in str(logs)
