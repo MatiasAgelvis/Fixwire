@@ -12,7 +12,9 @@ import pytest
 SRC = Path(__file__).resolve().parents[2] / "src" / "fixwire"
 
 ALLOWED_LEVELS = {"debug", "info", "warning", "error"}
-ALLOWED_ROOTS = {"session", "runner", "server", "transport", "parser"}
+ALLOWED_ROOTS = {
+    "session", "runner", "server", "transport", "parser", "shutdown"
+}
 
 # logger.info("name", ...) or logger.warning(\n    "name", ...
 CALL = re.compile(
@@ -20,7 +22,7 @@ CALL = re.compile(
 )
 # <root>[.<segment>].<event>, all lowercase snake_case
 NAME = re.compile(
-    r"^(session|runner|server|transport|parser)(\.[a-z][a-z0-9_]*)+$"
+    r"^(" + "|".join(sorted(ALLOWED_ROOTS)) + r")(\.[a-z][a-z0-9_]*)+$"
 )
 
 

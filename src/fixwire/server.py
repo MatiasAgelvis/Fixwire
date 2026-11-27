@@ -24,6 +24,7 @@ the application (or a thin adapter module), for example:
 
 from __future__ import annotations
 
+import asyncio
 from collections.abc import Callable
 from dataclasses import dataclass
 
@@ -136,7 +137,32 @@ class FIXServer:
         if identity is not None and self._sessions.get(identity) is engine:
             del self._sessions[identity]
 
-    async def stop(self) -> None:
-        """Disconnect every active session."""
-        for engine in list(self._engines):
-            await engine.disconnect()
+    async def stop(self, timeout: float | None = None) -> None:
+        """Disconnect every active session, concurrently.
+
+        Sessions are torn down in parallel: sequential disconnects would
+        cost ``logout_timeout`` per session, so a busy server could take
+        minutes to shut down.
+
+        Args:
+            timeout: Bound on the whole teardown. Sessions still running
+                when it expires are cancelled; shutdown is already
+                best-effort at that point.
+        """
+        engines = list(self._engines)
+        if not engines:
+            return
+
+        teardown = asyncio.gather(
+            *(engine.disconnect() for engine in engines),
+            return_exceptions=True,
+        )
+        if timeout is None:
+            await teardown
+            return
+        try:
+            await asyncio.wait_for(teardown, timeout=timeout)
+        except TimeoutError:
+            logger.warning("server.stop_timeout",
+                           timeout=timeout,
+                           sessions=len(engines))

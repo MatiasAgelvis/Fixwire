@@ -158,6 +158,17 @@ editing this document and `ALLOWED_ROOTS` in that test.
 | `server.session_failed` | warning | One session raised out of its handler |
 | `server.duplicate_logon` | warning | Live identity claimed again |
 | `server.max_sessions_reached` | warning | Connection refused by the cap |
+| `server.stop_timeout` | warning | Teardown exceeded the shutdown deadline |
+
+### `shutdown.*`
+
+| Event | Level | Meaning |
+|---|---|---|
+| `shutdown.started` | info | A termination signal triggered shutdown |
+| `shutdown.complete` | info | Every stop callback ran |
+| `shutdown.already_running` | warning | Signal re-delivered while shutting down |
+| `shutdown.step_timeout` | warning | One stop callback exceeded its bound |
+| `shutdown.step_failed` | error | One stop callback raised |
 
 ### `transport.ws.*`
 

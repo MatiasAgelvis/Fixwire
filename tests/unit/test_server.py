@@ -326,3 +326,60 @@ class TestFIXServerDuplicateLogon:
         # Cleanup
         await server.stop()
         await asyncio.wait_for(task2, timeout=2.0)
+
+
+class TestFIXServerStop:
+    """stop() tears sessions down concurrently and can be bounded.
+
+    Sequential disconnects would make shutdown take ``logout_timeout`` per
+    session, so a SIGTERM with 100 stuck sessions could take minutes.
+    """
+
+    @pytest.mark.asyncio
+    async def test_stop_disconnects_sessions_concurrently(self, server):
+        """Both sessions must be mid-disconnect at the same time."""
+        # Arrange
+        started = asyncio.Event()
+        release = asyncio.Event()
+        running = 0
+
+        async def disconnect() -> None:
+            nonlocal running
+            running += 1
+            if running == 2:
+                started.set()
+            await release.wait()
+
+        class _Engine:
+            async def disconnect(self) -> None:
+                await disconnect()
+
+        server._engines.update({_Engine(), _Engine()})
+
+        # Act
+        task = asyncio.create_task(server.stop())
+        # Sequential teardown would never reach the second engine
+        await asyncio.wait_for(started.wait(), timeout=1.0)
+        release.set()
+        await asyncio.wait_for(task, timeout=1.0)
+
+        # Assert
+        assert running == 2
+
+    @pytest.mark.asyncio
+    async def test_stop_timeout_bounds_a_stuck_session(self, server):
+        """A wedged session cannot make shutdown unbounded."""
+        # Arrange
+        class _Stuck:
+            async def disconnect(self) -> None:
+                await asyncio.Event().wait()
+
+        server._engines.add(_Stuck())
+        loop = asyncio.get_running_loop()
+
+        # Act
+        began = loop.time()
+        await server.stop(timeout=0.05)
+
+        # Assert
+        assert loop.time() - began < 1.0
