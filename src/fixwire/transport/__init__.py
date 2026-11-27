@@ -8,9 +8,15 @@ from __future__ import annotations
 from typing import Protocol
 
 from fixwire.transport.memory import InMemoryTransport
+from fixwire.transport.security import TransportSecurity
 from fixwire.transport.websocket import WebSocketTransport
 
-__all__ = ["Transport", "InMemoryTransport", "WebSocketTransport"]
+__all__ = [
+    "Transport",
+    "TransportSecurity",
+    "InMemoryTransport",
+    "WebSocketTransport",
+]
 
 
 class Transport(Protocol):
@@ -60,4 +66,14 @@ class Transport(Protocol):
     @property
     def is_connected(self) -> bool:
         """Check if transport is connected."""
+        ...
+
+    @property
+    def security(self) -> TransportSecurity:
+        """How this transport protects bytes, as built — not as configured.
+
+        Reported rather than accepted so admission policy and audit can
+        trust it. An implementation must never claim TLS it did not
+        negotiate.
+        """
         ...
