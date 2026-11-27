@@ -596,12 +596,13 @@ class FIXSession:
         """Handle Reject message."""
         ref_seq = msg.reference_sequence_number
         reason = msg.reject_reason
-        text = msg.text
 
+        # The peer's Text (58) is attacker-controlled free text; log its
+        # size, not its contents. See docs/AUDIT_LOGGING.md.
         logger.warning("session.rejected",
                       ref_seq=ref_seq,
                       reason=reason,
-                      text=text)
+                      text_length=len(msg.text))
 
     async def _handle_sequence_reset(self, msg: FIXMessage) -> None:
         """Handle SequenceReset.
