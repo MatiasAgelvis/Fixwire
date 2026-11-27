@@ -151,7 +151,7 @@ Every milestone declares which level it aims at. Level must be **proven via the 
 - **Audit logging.** Every state transition, every msg in/out, every error — structured via `structlog`, levels correct (DEBUG for message traces, INFO for lifecycle, WARNING for recoverable, ERROR for sessions-ending, no CRITICAL).
 - **Bounded inbound queue** (the M1 deferral lands here). Depth-bounded queue between transport and session, with queue-full policy: block with timeout → `ERROR` — **never drop**; sequence integrity is inviolable. Exposes queue depth for observability. *(Deferred — see `TODO.md` under Backpressure: nothing slow sits between transport and session now that app callbacks run off the receive path.)*
 - **App callback isolation.** `on_message` callbacks must never block protocol handling (heartbeat/TestRequest responses). Hand off to their own task so a slow app degrades itself, not the session.
-- **Time shutdown.** Clean shutdown on SIGTERM — graceful logout first, then transport close.
+- **Time shutdown.** Clean shutdown on SIGTERM — graceful logout first, then transport close. *(Shipped: `fixwire.shutdown.GracefulShutdown` handles SIGTERM/SIGINT and runs stop callbacks in order with a per-step bound; `FIXServer.stop(timeout=...)` tears sessions down concurrently, so shutdown costs one `logout_timeout` rather than one per session.)*
 
 **Deliverables:**
 - `SequenceStore` interface + `FileSequenceStore` + `InMemorySequenceStore` (the latter for tests)
