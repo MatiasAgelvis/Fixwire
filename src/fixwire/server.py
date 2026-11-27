@@ -42,6 +42,10 @@ logger = structlog.get_logger()
 class ServerConfig:
     """FIX Server Configuration."""
     max_sessions: int = 100
+    # Refuse connections that are not TLS. On by default: a server a bank
+    # installs should not accept orders over a plaintext socket. Test and
+    # in-memory deployments opt out explicitly.
+    require_tls: bool = True
 
 
 class FIXServer:
@@ -90,8 +94,15 @@ class FIXServer:
         """Adopt a connected transport as a session.
 
         Returns when the session ends, after tearing the engine down and
-        deregistering it. Over the cap, the transport is closed instead.
+deregistering it. Over the cap, or unencrypted where TLS is required,
+the transport is closed instead.
         """
+        if self.config.require_tls and not transport.security.is_encrypted:
+            logger.warning("server.plaintext_rejected",
+                           security=transport.security.value)
+            await transport.close()
+            return
+
         if len(self._engines) >= self.config.max_sessions:
             logger.warning("server.max_sessions_reached",
                            max=self.config.max_sessions)

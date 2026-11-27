@@ -11,6 +11,8 @@ from __future__ import annotations
 import asyncio
 from typing import TYPE_CHECKING
 
+from fixwire.transport.security import TransportSecurity
+
 if TYPE_CHECKING:
     from fixwire.transport import Transport
 
@@ -72,6 +74,11 @@ class InMemoryTransport:
     def is_connected(self) -> bool:
         """Check if transport is connected."""
         return self._connected
+
+    @property
+    def security(self) -> TransportSecurity:
+        """No wire, therefore no protection — and no false claim."""
+        return TransportSecurity.IN_MEMORY
 
 
 # Type-level proof that InMemoryTransport satisfies the Transport Protocol.

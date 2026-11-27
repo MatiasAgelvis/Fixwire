@@ -7,7 +7,7 @@ from __future__ import annotations
 
 import asyncio
 from collections.abc import Callable
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Any
 
 import structlog
 import websockets
@@ -16,6 +16,9 @@ from websockets.asyncio.server import ServerConnection, serve
 
 if TYPE_CHECKING:
     from fixwire.transport import Transport
+
+from fixwire.transport.security import TransportSecurity
+from fixwire.transport.tls import TLSConfig, TLSError, build_ssl_context
 
 logger = structlog.get_logger()
 
@@ -62,6 +65,7 @@ class WebSocketTransport:
         max_size: int = 1_048_576,
         ping_interval: float | None = None,
         ping_timeout: float | None = None,
+        tls: TLSConfig | None = None,
     ) -> None:
         """Initialize WebSocket client transport.
 
@@ -76,12 +80,22 @@ class WebSocketTransport:
                 second, more aggressive timer would close the connection as
                 a transport error before the session could escalate.
             ping_timeout: Seconds to wait for a pong before closing.
+            tls: TLS settings. ``None`` keeps the ``websockets`` default for
+                ``wss://`` URLs, which verifies the peer. Building the
+                context here means a bad path fails at startup, not at the
+                first handshake.
         """
+        if tls is not None and not url.lower().startswith("wss://"):
+            raise TLSError(
+                f"TLS config requires a wss:// URL, got {url!r}"
+            )
         self.url = url
         self.timeout = timeout
         self.max_size = max_size
         self.ping_interval = ping_interval
         self.ping_timeout = ping_timeout
+        self.tls = tls
+        self._ssl_context = build_ssl_context(tls) if tls is not None else None
         self._ws = None
         self._connected = False
 
@@ -89,6 +103,13 @@ class WebSocketTransport:
     def is_connected(self) -> bool:
         """Check if transport is connected."""
         return self._connected and self._ws is not None
+
+    @property
+    def security(self) -> TransportSecurity:
+        """TLS exactly when a context was configured for this transport."""
+        if self._ssl_context is None:
+            return TransportSecurity.PLAINTEXT
+        return TransportSecurity.TLS
 
     @property
     def _connection(self) -> ClientConnection:
@@ -109,13 +130,15 @@ class WebSocketTransport:
             TimeoutError: If connection times out.
         """
         try:
+            options: dict[str, Any] = {
+                "max_size": self.max_size,
+                "ping_interval": self.ping_interval,
+                "ping_timeout": self.ping_timeout,
+            }
+            if self._ssl_context is not None:
+                options["ssl"] = self._ssl_context
             self._ws = await asyncio.wait_for(
-                connect(
-                    self.url,
-                    max_size=self.max_size,
-                    ping_interval=self.ping_interval,
-                    ping_timeout=self.ping_timeout,
-                ),
+                connect(self.url, **options),
                 timeout=self.timeout
             )
             self._connected = True
@@ -199,6 +222,7 @@ class WebSocketServer:
         max_size: int = 1_048_576,
         ping_interval: float | None = None,
         ping_timeout: float | None = None,
+        tls: TLSConfig | None = None,
     ) -> None:
         """Initialize WebSocket server.
 
@@ -213,12 +237,16 @@ class WebSocketServer:
                 second, more aggressive timer would close the connection as
                 a transport error before the session could escalate.
             ping_timeout: Seconds to wait for a pong before closing.
+            tls: TLS settings. ``None`` listens in clear text; a server
+                config must carry the certificate clients will see.
         """
         self.host = host
         self.port = port
         self.max_size = max_size
         self.ping_interval = ping_interval
         self.ping_timeout = ping_timeout
+        self.tls = tls
+        self._ssl_context = build_ssl_context(tls) if tls is not None else None
         self._server = None
         self._connections: dict[str, ServerConnection] = {}
         self._connection_handler: Callable | None = None
@@ -278,13 +306,15 @@ class WebSocketServer:
         if self.is_running:
             raise RuntimeError("Server already running")
 
+        options: dict[str, Any] = {
+            "max_size": self.max_size,
+            "ping_interval": self.ping_interval,
+            "ping_timeout": self.ping_timeout,
+        }
+        if self._ssl_context is not None:
+            options["ssl"] = self._ssl_context
         self._server = await serve(
-            self._handle_connection,
-            self.host,
-            self.port,
-            max_size=self.max_size,
-            ping_interval=self.ping_interval,
-            ping_timeout=self.ping_timeout,
+            self._handle_connection, self.host, self.port, **options
         )
         logger.info("transport.ws.server_started",
                     host=self.host,
@@ -338,6 +368,20 @@ class WebSocketTransportAdapter:
     def is_connected(self) -> bool:
         """Check if transport is connected."""
         return self._connected
+
+    @property
+    def security(self) -> TransportSecurity:
+        """What the accepted connection actually negotiated.
+
+        Asked of the socket rather than configured, so a listener that
+        quietly runs without TLS cannot be reported as encrypted.
+        """
+        if self._ws is None:
+            return TransportSecurity.PLAINTEXT
+        ssl_object = self._ws.transport.get_extra_info("ssl_object")
+        if ssl_object is None:
+            return TransportSecurity.PLAINTEXT
+        return TransportSecurity.TLS
 
     @property
     def _connection(self) -> ServerConnection:

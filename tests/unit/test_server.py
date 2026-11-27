@@ -61,7 +61,10 @@ async def _wait_until(predicate, timeout: float = 1.0) -> None:
 
 @pytest.fixture
 def server() -> FIXServer:
-    return FIXServer(_config_factory, config=ServerConfig(max_sessions=10))
+    return FIXServer(
+        _config_factory,
+        config=ServerConfig(max_sessions=10, require_tls=False),
+    )
 
 
 @pytest.fixture
@@ -144,7 +147,10 @@ class TestFIXServerAccept:
     async def test_max_sessions_closes_extra_connection(self):
         """Beyond the cap, a new connection is closed and not registered."""
         # Arrange
-        server = FIXServer(_config_factory, config=ServerConfig(max_sessions=1))
+        server = FIXServer(
+            _config_factory,
+            config=ServerConfig(max_sessions=1, require_tls=False),
+        )
         t1 = InMemoryTransport()
         t1.feed(_peer_logon())
         task1 = asyncio.create_task(server.serve_connection(t1))
@@ -383,3 +389,49 @@ class TestFIXServerStop:
 
         # Assert
         assert loop.time() - began < 1.0
+
+
+class TestFIXServerTLSAdmission:
+    """A server can refuse connections that are not encrypted."""
+
+    def test_tls_is_required_by_default(self):
+        """Secure by default: a bank-installed server starts locked down."""
+        assert ServerConfig().require_tls is True
+
+    @pytest.mark.asyncio
+    async def test_plaintext_is_rejected_when_tls_is_required(self):
+        """A plaintext connection is closed before any session is created."""
+        # Arrange
+        server = FIXServer(_config_factory)  # require_tls defaults True
+        transport = InMemoryTransport()
+        transport.feed(_peer_logon())
+
+        # Act
+        await asyncio.wait_for(
+            server.serve_connection(transport), timeout=1.0
+        )
+
+        # Assert
+        assert transport.is_connected is False
+        assert server.session_count == 0
+
+    @pytest.mark.asyncio
+    async def test_plaintext_is_allowed_when_tls_is_not_required(self):
+        """Test and in-memory deployments can opt out explicitly."""
+        # Arrange
+        server = FIXServer(
+            _config_factory, config=ServerConfig(require_tls=False)
+        )
+        transport = InMemoryTransport()
+        transport.feed(_peer_logon())
+
+        # Act
+        task = asyncio.create_task(server.serve_connection(transport))
+        await _wait_until(lambda: server.session_count == 1)
+
+        # Assert
+        assert server.session_count == 1
+
+        # Cleanup
+        await server.stop()
+        await asyncio.wait_for(task, timeout=2.0)
