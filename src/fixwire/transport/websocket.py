@@ -17,6 +17,7 @@ from websockets.asyncio.server import ServerConnection, serve
 if TYPE_CHECKING:
     from fixwire.transport import Transport
 
+from fixwire.core.redaction import redact_url
 from fixwire.transport.security import TransportSecurity
 from fixwire.transport.tls import TLSConfig, TLSError, build_ssl_context
 
@@ -142,7 +143,7 @@ class WebSocketTransport:
                 timeout=self.timeout
             )
             self._connected = True
-            logger.info("transport.ws.connected", url=self.url)
+            logger.info("transport.ws.connected", url=redact_url(self.url))
         except TimeoutError:
             raise TimeoutError(f"Connection timed out: {self.url}") from None
         except Exception as e:
@@ -194,7 +195,7 @@ class WebSocketTransport:
         finally:
             self._connected = False
             self._ws = None
-            logger.info("transport.ws.closed", url=self.url)
+            logger.info("transport.ws.closed", url=redact_url(self.url))
 
 
 # Type-level proof that WebSocketTransport satisfies the Transport Protocol.
