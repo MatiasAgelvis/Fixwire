@@ -95,3 +95,10 @@ class TestInMemoryTransportClose:
         # Assert
         assert transport.close_count == 2
         assert transport.is_connected is False
+
+
+def test_reports_in_memory_security():
+    """An in-memory transport must not claim to be encrypted."""
+    from fixwire.transport import TransportSecurity
+
+    assert InMemoryTransport().security == TransportSecurity.IN_MEMORY
