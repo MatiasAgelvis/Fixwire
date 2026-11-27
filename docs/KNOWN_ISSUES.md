@@ -47,6 +47,13 @@
 - [ ] ResendRequest for missed messages
 - [ ] GapFill handling
 - [ ] Sequence number synchronization
+- [ ] Reconnect baseline silently skips unreceived messages
+
+  On reconnect the peer's Logon MsgSeqNum becomes our expected incoming
+  number (`_handle_logon`), so messages we never received — anywhere from
+  the last one we processed up to that number — are never requested. FIX
+  expects the receiver to compare and send a ResendRequest for the gap.
+  Belongs with the M5 resend path, where requesting and replaying exist.
 
 ### Outbound
 - [ ] Losing the in-flight message on send failure

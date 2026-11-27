@@ -160,7 +160,7 @@ Every milestone declares which level it aims at. Level must be **proven via the 
 - Audit log spec (event names, payloads, retention policy)
 - Graceful shutdown
 
-**Test bar reached:** B. Chaos scenarios for: process crash mid-message, network drop mid-stream, restart with persisted seq.
+**Test bar reached:** B. Chaos scenarios for: process crash mid-message, network drop mid-stream, restart with persisted seq. *(Covered by `tests/unit/test_chaos.py`.)*
 
 ---
 
