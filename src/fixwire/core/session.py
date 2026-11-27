@@ -652,6 +652,9 @@ class FIXSession:
         the counters would make the peer see a false gap.
         """
         self.status = SessionStatus.CONNECTING
+        # A new connection is a new byte stream: discard anything left in
+        # the parser by a stream that died mid-message.
+        self.parser.reset()
 
         if self.config.reset_seq_num:
             # Starting a new sequence overwrites the stored one as soon as
