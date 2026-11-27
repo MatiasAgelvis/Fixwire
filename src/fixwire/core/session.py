@@ -207,7 +207,7 @@ class FIXSession:
                 if asyncio.iscoroutine(result):
                     await result
             except Exception as e:
-                logger.error("session.callback_error",
+                logger.warning("session.callback_error",
                            error=str(e),
                            msg_type=msg.msg_type)
 
@@ -302,7 +302,7 @@ class FIXSession:
         self._send_queue.put_nowait(msg)
 
         self._state.last_sent_time = utc_now()
-        logger.debug("session.message_sent",
+        logger.debug("session.message_queued",
                     msg_type=msg.msg_type,
                     seq=msg.sequence)
 
@@ -734,7 +734,7 @@ class FIXSession:
         if self._state.test_request_id:
             # Previous test request not answered: terminate, but tell the
             # peer why before parking the session.
-            logger.warning("session.heartbeat_timeout")
+            logger.error("session.heartbeat_timeout")
             logout = FIXMessageFactory.create_logout(
                 sender=self.config.sender_comp_id,
                 target=self.config.target_comp_id,

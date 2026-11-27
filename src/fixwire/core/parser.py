@@ -167,7 +167,7 @@ class FIXParser:
         except FIXParseError as e:
             if self.config.strict:
                 raise
-            logger.warning("parse.error", error=str(e), raw=raw_msg[:100])
+            logger.warning("parser.error", error=str(e), raw=raw_msg[:100])
             return None
 
     def _reject_oversized(self) -> None:

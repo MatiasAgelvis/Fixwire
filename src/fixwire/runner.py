@@ -329,14 +329,14 @@ class FIXSessionRunner:
 
     async def _teardown_on_error(self) -> None:
         """Announce the failure, then drain and close."""
-        logger.warning("runner.session_error",
+        logger.error("runner.session_error",
                        sender=self._session.config.sender_comp_id,
                        target=self._session.config.target_comp_id)
         await self._drain_and_close()
 
     async def _teardown_on_logout(self) -> None:
         """Announce the clean logout, then drain and close."""
-        logger.info("runner.logout_complete",
+        logger.info("runner.logout_teardown",
                     sender=self._session.config.sender_comp_id,
                     target=self._session.config.target_comp_id)
         await self._drain_and_close()
@@ -361,6 +361,9 @@ class FIXSessionRunner:
             try:
                 data = msg.serialize()
                 await self._safe_send(data)
+                logger.debug("runner.message_written",
+                             msg_type=msg.msg_type,
+                             seq=msg.sequence)
             except Exception as e:
                 await self._handle_task_error("writer", e)
                 return
