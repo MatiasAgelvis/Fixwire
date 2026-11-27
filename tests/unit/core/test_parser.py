@@ -586,3 +586,27 @@ class TestFIXParserConfig:
 
         with pytest.raises(FIXParseError, match="Too many tags"):
             parser.parse(raw)
+
+
+class TestFIXParserReset:
+    """A new connection starts a new byte stream."""
+
+    def test_reset_discards_a_partial_message(self):
+        """Leftover bytes must not corrupt the next stream.
+
+        Without a reset, the first message on the new connection is parsed
+        as a continuation of the one that died mid-flight, and fails its
+        checksum.
+        """
+        # Arrange: a partial message leaves bytes buffered
+        parser = FIXParser()
+        _, raw = build_raw_message({35: "0", 49: "C1", 56: "M1"})
+        assert parser.parse(raw[:10]) == []
+
+        # Act
+        parser.reset()
+
+        # Assert: the full message parses cleanly
+        messages = parser.parse(raw)
+        assert len(messages) == 1
+        assert messages[0][49] == "C1"
